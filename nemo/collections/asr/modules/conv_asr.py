@@ -451,6 +451,7 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
 
         accepted_adapters = [adapter_utils.LINEAR_ADAPTER_CLASSPATH]
         self.set_accepted_adapter_types(accepted_adapters)
+        self.upsample = torch.nn.Upsample(scale_factor=2, mode='linear', align_corners=False)
 
         # to change, requires running ``model.temperature = T`` explicitly
         self.temperature = 1.0
@@ -458,6 +459,7 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
     @typecheck()
     def forward(self, encoder_output):
         # Adapter module forward step
+        encoder_output = self.upsample(encoder_output)
         if self.is_adapter_available():
             encoder_output = encoder_output.transpose(1, 2)  # [B, T, C]
             encoder_output = self.forward_enabled_adapters(encoder_output)
