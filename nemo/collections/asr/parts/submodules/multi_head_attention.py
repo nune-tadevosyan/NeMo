@@ -38,9 +38,11 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.attention
 import torch.nn.functional as F
 
 from nemo.utils import avoid_float16_autocast_context
+from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
 __all__ = [
     'RelPositionMultiHeadAttention',
@@ -48,6 +50,123 @@ __all__ = [
     'PositionalEncoding',
 ]
 
+INF_VAL = 10000.0
+
+def apply_rotary_position_embeddings(sinusoidal_pos, q, k):
+    # Split the sinusoidal_pos into sin and cos parts
+    sin, cos = sinusoidal_pos.chunk(2, dim=-1)
+    # Apply the rotary embeddings to the query and key
+    q_rot = torch.stack((-q[..., 1::2], q[..., ::2]), dim=-1)
+    k_rot = torch.stack((-k[..., 1::2], k[..., ::2]), dim=-1)
+    q_rot = torch.reshape(q_rot, q.shape[:-1] + (q.shape[-1]//2, 2)) * torch.stack((cos, sin), dim=-1)
+    k_rot = torch.reshape(k_rot, k.shape[:-1] + (k.shape[-1]//2, 2)) * torch.stack((cos, sin), dim=-1)
+    q_rot = torch.reshape(q_rot, q.shape)
+    k_rot = torch.reshape(k_rot, k.shape)
+    return q_rot, k_rot
+
+def get_sinusoidal_embeddings( n_positions, dim):
+    """Generate sinusoidal positional embeddings."""
+    position = torch.arange(n_positions, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+    sinusoidal_emb = torch.zeros((n_positions, dim))
+    sinusoidal_emb[:, 0::2] = torch.sin(position * div_term)
+    sinusoidal_emb[:, 1::2] = torch.cos(position * div_term)
+    return sinusoidal_emb
+
+def print_tensor_info(tensor, name,  idim, printit=1):
+    if (printit == 0):
+        return
+    tensor = tensor.float()
+    print()
+    #print("%s.shape: %s" % (name, tensor.shape))
+    total_norm = tensor.norm()
+    nparams = tensor.numel()
+    norm_perdim = tensor.norm(dim=idim)
+    meannorm_perdim = torch.mean(norm_perdim)
+    print(f"meannorm_perdim {name } {meannorm_perdim}")
+    relative_deviation = 100.0 *torch.abs(norm_perdim - meannorm_perdim)/meannorm_perdim
+    maxdeviation_in_perc = relative_deviation.max()
+    meandeviation_in_perc = relative_deviation.mean()
+    
+    print("%s:\t%s\tnorm: %f \tnparams: %d\tnorm_perparam: %f:\tmax deviation: %f(%%)\tmean deviation: %f(%%)" % 
+            (name, tensor.shape, total_norm, nparams, total_norm/(nparams ** 0.5), maxdeviation_in_perc, meandeviation_in_perc))
+
+def justnorm_and_stat(x, idim=-1, name="", printit=1, only_stat = False):
+   # print("before")
+    if not only_stat:
+        print_tensor_info(x.weight, name, printit, idim)
+        res = x.weight.data.copy_(justnorm(x.weight.data, idim=idim))
+    else:
+        print_tensor_info(x.weight, name, printit, idim)
+    return res
+
+def justnorm( x, idim=-1):
+    """Normalize the input tensor."""
+    return x / x.norm(p=2, dim=idim, keepdim=True)
+
+class NGPTBlock(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        print(config)
+        self.config = config
+
+        self.key = nn.Linear(config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16)
+        self.query = nn.Linear(config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16)
+        self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16)
+        self.att_c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias, dtype=torch.bfloat16)
+        
+    
+        if (config.use_nGPT == 1):
+            self.attn_alpha_init_value = 0.05
+            self.attn_alpha_init_scaling = config.base_scale
+            #not need this in our case
+            #self.attn_alpha = torch.nn.Parameter(self.attn_alpha_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
+
+            self.sqk_init_value = 1.0       
+            self.sqk_init_scaling = config.base_scale
+            self.sqk = torch.nn.Parameter(self.sqk_init_scaling*torch.ones(self.config.n_embd, dtype=torch.float32))
+
+            self.suv_init_value = 1.0
+            self.suv_init_scaling = 1.0
+            #self.suv = torch.nn.Parameter(self.suv_init_scaling*torch.ones(2 * 4 * config.n_embd, dtype=torch.float32))
+    
+    def forward(self, h):
+        B, T, C = h.size()
+
+        hin = h
+        hin = h.to(dtype=torch.bfloat16) 
+        # if (self.config.use_nGPT == 0):
+        #     hin = self.rmsnorm_att(h)
+        q = self.query(hin)
+        k = self.key(hin)
+        v = self.value(hin)
+
+        q = q.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head) 
+        k = k.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+        v = v.view(B, T, self.config.n_head, self.config.n_embd // self.config.n_head)
+
+        sinusoidal_pos = get_sinusoidal_embeddings(T, self.config.n_embd // self.config.n_head).to(device=q.device)
+        q, k = apply_rotary_position_embeddings(sinusoidal_pos, q.transpose(1, 2), k.transpose(1, 2))
+        q = q.transpose(2, 1)
+        k = k.transpose(2, 1)
+
+        if (self.config.use_nGPT == 1):
+            sqk = (self.sqk * (self.sqk_init_value/self.sqk_init_scaling)).view(1, 1, self.config.n_head, self.config.n_embd // self.config.n_head)
+            q = sqk * justnorm(q)  
+            k = sqk * justnorm(k)  
+
+        sqrt_head_dim = (self.config.n_embd / self.config.n_head) ** 0.5
+
+        if (self.config.use_nGPT == 1): softmax_scale = sqrt_head_dim 
+        y = flash_attn_func(q.to(dtype=torch.bfloat16), k.to(dtype=torch.bfloat16), v.to(dtype=torch.bfloat16), dropout_p=0.0, softmax_scale=softmax_scale, causal=True, window_size=(-1, -1), alibi_slopes=None, deterministic=True)
+        y = y.to(dtype=torch.bfloat16)
+        y = y.contiguous().view(B, T, self.config.n_embd)
+
+        h_att = self.att_c_proj(y)
+
+        h  =  self.justnorm(h_att)
+        return h
 
 class MultiHeadAttention(nn.Module):
     """Multi-Head Attention layer of Transformer.
@@ -58,7 +177,7 @@ class MultiHeadAttention(nn.Module):
         use_bias (bool): whether to remove bias in linear and conv layers
     """
 
-    def __init__(self, n_head, n_feat, dropout_rate, max_cache_len=0, use_bias=True):
+    def __init__(self, n_head, n_feat, dropout_rate, max_cache_len=0, use_bias=True, config=None, use_ngpt=True):
         """Construct an MultiHeadedAttention object."""
         super(MultiHeadAttention, self).__init__()
         self.cache_drop_size = None
@@ -75,6 +194,12 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(p=dropout_rate)
 
         self._max_cache_len = max_cache_len
+        self.sqk_init_value = 1.0
+        self.sqk_init_scaling =  1.0 / (n_feat ** 0.5)  #config.base_scale if config else 1.0
+        self.use_ngpt= use_ngpt
+        self.sqk = nn.Parameter(
+            self.sqk_init_scaling * torch.ones(n_feat, dtype=torch.float32)
+        )
 
     def set_dropout(self, dropout):
         """
@@ -97,12 +222,16 @@ class MultiHeadAttention(nn.Module):
             v (torch.Tensor): (batch, head, time2, size)
         """
         n_batch = query.size(0)
+        # print("*********************************************************************************")
+        # print_tensor_info(query, name="before linear layer q", idim=-1)
         q = self.linear_q(query).view(n_batch, -1, self.h, self.d_k)
         k = self.linear_k(key).view(n_batch, -1, self.h, self.d_k)
         v = self.linear_v(value).view(n_batch, -1, self.h, self.d_k)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        # print_tensor_info(q, name="after linear layer q", idim=-1)
+        # print("*********************************************************************************")
 
         return q, k, v
 
@@ -150,8 +279,16 @@ class MultiHeadAttention(nn.Module):
         # temporary until we solve this more gracefully
         with avoid_float16_autocast_context():
             q, k, v = self.forward_qkv(query, key, value)
+            if self.use_ngpt:
+                sqk = (self.sqk * (self.d_k ** 0.5) * (self.sqk_init_value / self.sqk_init_scaling)).view( 1,  self.h, 1, self.d_k)
+                # can multiply sqk**2 only query
+                k = sqk * justnorm(k)  
+                q = sqk * justnorm(q) 
+                
             scores = torch.matmul(q, k.transpose(-2, -1)) / self.s_d_k
             out = self.forward_attention(v, scores, mask)
+        if self.use_ngpt:
+            out = justnorm(out)        
         if cache is None:
             return out
         else:
@@ -175,7 +312,7 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         use_bias (bool): whether to apply bias in linear and conv layers of MultiHeadAttention
     """
 
-    def __init__(self, n_head, n_feat, dropout_rate, pos_bias_u, pos_bias_v, max_cache_len=0, use_bias=True):
+    def __init__(self, n_head, n_feat, dropout_rate, pos_bias_u, pos_bias_v, max_cache_len=0, use_bias=True, use_ngpt=True):
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(
             n_head=n_head,
@@ -198,6 +335,10 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         else:
             self.pos_bias_u = pos_bias_u
             self.pos_bias_v = pos_bias_v
+        self.use_ngpt= use_ngpt
+        self.sqk = nn.Parameter(
+            self.sqk_init_scaling * torch.ones(n_feat, dtype=torch.float32)
+        )
 
     def rel_shift(self, x):
         """Compute relative positional encoding.
@@ -212,6 +353,26 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         x = x[:, :, 1:].view(b, h, qlen, pos_len)  # (b, h, t1, t2)
         return x
 
+    def normalize_weights(self, print_stats=False):
+        """
+        Normalize the weights of a RelPositionMultiHeadAttention instance.
+
+        Args:
+            rp_mha (RelPositionMultiHeadAttention): The instance to normalize.
+            print_stats (bool): Whether to print statistics for the weights.
+        """
+
+        # Normalize linear layers
+        if self.i == 0:
+            self.linear_q.weight.data.copy_(justnorm_and_stat(self.linear_q, idim=1, name="att_q"))
+            self.linear_k.weight.data.copy_(justnorm_and_stat(self.linear_k, idim=1, name="att_k"))
+            self.linear_v.weight.data.copy_(justnorm_and_stat(self.linear_v, idim=1, name="att_v"))
+            self.linear_out.weight.data.copy_(justnorm_and_stat(self.linear_out, idim=0, name="at_tprj"))
+            #normalization of parameters for positional embedinfs
+            self.linear_pos.weight.data = self.linear_q.weight.data.copy_(justnorm_and_stat(self.linear_pos, idim=1, name="att_pos"))
+
+        return 
+    
     def set_dropout(self, dropout):
         """
         Sets the dropout rate.
@@ -258,6 +419,18 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
             # first compute matrix a and matrix c
             # as described in https://arxiv.org/abs/1901.02860 Section 3.3
             # (batch, head, time1, time2)
+            if self.use_ngpt:
+            # Normalize Q and K
+                sqk = (self.sqk * (self.d_k ** 0.5) * (self.sqk_init_value / self.sqk_init_scaling)).view(
+                    1,  self.h, 1, self.d_k
+                )
+                # only query to make it quickers
+                q_with_bias_u = sqk * justnorm(q_with_bias_u)            
+                k = sqk * justnorm(k)  
+                #Normalizing without sqk, it will be multiplied with positional encodings
+                q_with_bias_v = sqk * justnorm(q_with_bias_v)
+                p = sqk * justnorm(p)
+            # This is matrix for positional embedings 
             matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
 
             # compute matrix b and matrix d
@@ -270,6 +443,7 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
             scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
 
             out = self.forward_attention(v, scores, mask)
+            out = justnorm(out)
 
         if cache is None:
             return out
