@@ -24,6 +24,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
     MultiHeadAttention,
     RelPositionMultiHeadAttention,
     RelPositionMultiHeadAttentionLongformer,
+    NGPTBlock,
 )
 from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.common.parts.utils import activation_registry
@@ -99,7 +100,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         )
 
         # multi-headed self-attention module
-        self.norm_self_att = LayerNorm(d_model)
+        #self.norm_self_att = LayerNorm(d_model)
         MHA_max_cache_len = att_context_size[0]
 
         if self_attention_model == 'rel_pos':
@@ -139,7 +140,18 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
                 f"'{self_attention_model}' is not not a valid value for 'self_attention_model', "
                 f"valid values can be from ['rel_pos', 'rel_pos_local_attn', 'abs_pos']"
             )
-
+        ngpt_config = {
+            "block_size": d_model,
+            "n_head" : n_heads,
+            "n_embd": d_model,
+            "base_scale": 1.0 / (d_model ** 0.5) ,
+            "use_nGPT": 1,
+            "dropout": dropout_att.as_integer_ratio,
+            "bias" : use_bias,
+        }
+        config_object = Config(ngpt_config)
+        #self.self_attn = NGPTBlock(config_object)
+        # second feed forward module
         # second feed forward module
         self.norm_feed_forward2 = LayerNorm(d_model)
         self.feed_forward2 = ConformerFeedForward(d_model=d_model, d_ff=d_ff, dropout=dropout, use_bias=use_bias)
@@ -162,11 +174,13 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
             cache_last_time (torch.tensor) : next cache for convolutional layers (B, d_model, T_cache)
         """
         residual = x
+        #Layer norm
         x = self.norm_feed_forward1(x)
+        # convolution feed forward two linear layers 
         x = self.feed_forward1(x)
         residual = residual + self.dropout(x) * self.fc_factor
 
-        x = self.norm_self_att(residual)
+        #x = self.norm_self_att(residual)
         if self.self_attention_model == 'rel_pos':
             x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)
         elif self.self_attention_model == 'rel_pos_local_attn':

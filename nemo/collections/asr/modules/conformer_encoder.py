@@ -451,6 +451,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         # will be set in self.forward() if defined in AccessMixin config
         self.interctc_capture_at_layers = None
 
+    def normalize_attn_weights(self):
+        for layer in self.layers:
+            layer.self_attn.normalize_weights()
     def set_dropout(self, dropout):
         """
         Set the dropout rate for all layers in the encoder..
