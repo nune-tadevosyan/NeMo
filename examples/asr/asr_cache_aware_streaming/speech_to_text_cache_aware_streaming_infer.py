@@ -410,6 +410,8 @@ def main():
                     debug_mode=args.debug_mode,
                     pad_and_drop_preencoded=args.pad_and_drop_preencoded,
                 )
+                for block in asr_model.encoder.ngpt.transformer["h"]:
+                    block.offset = 0
                 all_streaming_tran.extend(streaming_tran)
                 if args.compare_vs_offline:
                     all_offline_tran.extend(offline_tran)
