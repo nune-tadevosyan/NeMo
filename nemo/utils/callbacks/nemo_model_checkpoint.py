@@ -99,6 +99,7 @@ class NeMoModelCheckpoint(ModelCheckpoint):
             self.multistorageclient_enabled = MULTISTORAGECLIENT_AVAILABLE and kwargs.pop('multistorageclient_enabled')
 
         # Call the parent class constructor with the remaining kwargs.
+        kwargs.pop("multistorageclient_enabled", None) 
         super().__init__(**kwargs)
 
         if self.save_top_k != -1 and n_resume:
