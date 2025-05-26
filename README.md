@@ -7,6 +7,32 @@
 [![PyPi total downloads](https://static.pepy.tech/personalized-badge/nemo-toolkit?period=total&units=international_system&left_color=grey&right_color=brightgreen&left_text=downloads)](https://pepy.tech/project/nemo-toolkit)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
+## 🔁 TopIPL: Iterative Pseudo-Labeling for ASR
+
+This repository includes the **TopIPL** implementation for *Automatic Speech Recognition (ASR)*.  
+It introduces a flexible training mechanism where you can enable Iterative Pseudo-Labeling simply by modifying the config file – no code changes required.
+
+### 🛠️ How to Enable TopIPL in Config
+
+To get started, add the following block under `ipl:` in your experiment config:
+
+```yaml
+ipl:
+  n_epochs: <int>            # Number of epochs before first pseudo-label generation
+  restore_pc: <bool>         # Whether to restore pseudo-labels if they already exist (default: False)
+  manifest_filepath: <str>   # Path to the original dataset manifest
+  tarred_audio_filepaths: <str> # Path to tarred audio files (if applicable)
+  is_tarred: <bool>          # Whether the dataset is tarred
+  dataset_weights: <float|list> # Fraction or weights of dataset to use (non-tar only, default: 1)
+  limit_train_batches: <int> # Used only for Lhotse-style manifests during training with PLs
+  cache_manifest: <str>      # Path to the cached manifest file
+  m_epochs: 0                # Deprecated: use `max_steps` to control training instead
+  p_cache: <float>           # Probability to update pseudo-label cache
+  cache_prefix: <str>        # Prefix for saved cache files
+  batch_size: <int>          # Batch size for generating pseudo-labels
+  do_average: <bool>         # If True, average multiple checkpoints for PL generation
+  path_to_model: <str>       # Checkpoint paths to average (required if `do_average` is True)
+
 # **NVIDIA NeMo Framework**
 
 ## Latest News
