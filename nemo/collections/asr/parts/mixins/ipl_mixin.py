@@ -1,5 +1,4 @@
-
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +17,7 @@ import os
 import random
 import tempfile
 from typing import List, Union
-
+import logging 
 import editdistance
 import torch
 from omegaconf import ListConfig
@@ -32,11 +31,11 @@ class IPLMixin:
     """
     Adds ability to do iterative pseudo-labeling.
     To use ipl parameters should be given in the config as well as max_steps should be proovided in trainer.
-    For details, see: SlimIPL:(https://arxiv.org/pdf/2010.11524).
+    For details, see: TopIPL: Link
 
     Parameters in config.
     ipl:
-        m_epochs (int): Number of epochs to train model before first PL generation.
+        n_epochs (int): Number of epochs to train model before first PL generation.
         restore_pc (bool): Whether tp restore PC by comparing with already existing transcriptions if there are any. Defaults to `False`.
         manifest_filepath (str): Path to the dataset manifest file.
         tarred_audio_filepaths (str): Path to the tarred audio files.
@@ -44,12 +43,12 @@ class IPLMixin:
         dataset_weights (float or list): What part of the dataset to use (applicable with non-tar datasets). Defaults to 1.
         limit_train_batches (int): Limit_train_batches after PLs are added to train set (for lhotse only).
         cache_manifest (str): Path for cache the manifest file.
-        dropout (float): Dropout rate used during training after PL generation.
-        n_l_epochs (int): Number of epochs to train the model with changed dropout before adding PLs to train set.
+        m_epochs (int): Currenty is set to 0 and all number of epochs are controlled with max_steps.
         p_cache (float): Probability with which cache will be updated
         cache_prefix (str): Prefix for cache files (optional for non-tar datasets).
         batch_size (int): Batch size with which PLs will be generated
-
+        do_average (bool): For second part of the training in which pseudo-labels are generated using averaged checkpoints
+        path_to_model: Path to the model checkpoints that will be averages (do_average: True)
     Call
 
         * ``self.setup_ipl(model_type)``
@@ -72,7 +71,7 @@ class IPLMixin:
             if self.trainer and self.trainer.max_steps < 0:
                 raise ValueError(" For IPL to work max steps should be provided in the trainer.")
             self._process_ipl_config_values(ipl_config)
-
+            self.m_epochs = 0
             if self._ipl_params.get("is_tarred", False):
                 
                 self._ipl_params['cache_manifest'] = []
@@ -85,6 +84,7 @@ class IPLMixin:
                         self._ipl_params['manifest_filepath'], self._ipl_params['cache_prefix'], is_tarred=False
                     )
 
+
     def set_ipl_param(self, param_name, param_value):
         """
         Setting the parameter to the ``self._ipl_params`` dictionary.
@@ -92,38 +92,40 @@ class IPLMixin:
         Raises an error if trying to set parameters thar are not supported by IPL
         """
         if param_name not in [
-            'm_epochs',
+            'n_epochs',
             'restore_pc',
             'manifest_filepath',
             'tarred_audio_filepaths',
             'is_tarred',
             'dataset_weights',
-            'dropout',
             'limit_train_batches',
             'cache_manifest',
-            'n_l_epochs',
+            'm_epochs',
             'p_cache',
             'cache_prefix',
             'batch_size',
+            'do_average',
+            'path_to_model'
         ]:
             raise ValueError(f"Cannot set {param_name} as ipl parameter.")
         self._ipl_params[param_name] = param_value
 
     def _process_ipl_config_values(self, ipl_config):
 
-        self.set_ipl_param('m_epochs', ipl_config.get('m_epochs'))
+        self.set_ipl_param('n_epochs', ipl_config.get('n_epochs'))
         self.set_ipl_param('restore_pc', ipl_config.get('restore_pc'))
         self.set_ipl_param('manifest_filepath', ipl_config.get('manifest_filepath'))
         self.set_ipl_param('tarred_audio_filepaths', ipl_config.get('tarred_audio_filepaths'))
         self.set_ipl_param('is_tarred', ipl_config.get('is_tarred'))
         self.set_ipl_param('dataset_weights', ipl_config.get('dataset_weights'))
-        self.set_ipl_param('dropout', ipl_config.get('dropout'))
         self.set_ipl_param('limit_train_batches', ipl_config.get('limit_train_batches'))
         self.set_ipl_param('cache_manifest', ipl_config.get('cache_manifest'))
-        self.set_ipl_param('n_l_epochs', ipl_config.get('n_l_epochs'))
+        self.set_ipl_param('m_epochs', ipl_config.get('m_epochs'))
         self.set_ipl_param('p_cache', ipl_config.get('p_cache'))
         self.set_ipl_param('cache_prefix', ipl_config.get('cache_prefix'))
         self.set_ipl_param('batch_size', ipl_config.get('batch_size'))
+        self.set_ipl_param('do_average', ipl_config.get('do_average'))
+        self.set_ipl_param('path_to_model', ipl_config.get('path_to_model'))
 
     def on_train_epoch_end(self):
         """
@@ -141,25 +143,25 @@ class IPLMixin:
         torch.distributed.barrier()
         if not self.cfg.get("ipl"):
             return
-        if self._ipl_params['m_epochs'] > 0:
-            self._ipl_params['m_epochs'] -= 1
+        if self._ipl_params['n_epochs'] > 0:
+            self._ipl_params['n_epochs'] -= 1
             return
         needs_update = True
-        if self._ipl_params['m_epochs'] == 0:
+        if self._ipl_params['n_epochs'] == 0:
             self.build_cache(update_whole_cache=True)
 
-            self._ipl_params['m_epochs'] -= 1
+            self._ipl_params['n_epochs'] -= 1
             needs_update = False
 
-        if self._ipl_params['m_epochs'] == -1 and self._ipl_params['n_l_epochs'] > 0:
-            self._ipl_params['n_l_epochs'] -= 1
+        if self._ipl_params['n_epochs'] == -1 and self._ipl_params['m_epochs'] > 0:
+            self._ipl_params['m_epochs'] -= 1
         else:
             if needs_update:
                 self.build_cache(update_whole_cache=False)
 
-            if self._ipl_params['n_l_epochs'] == 0:
+            if self._ipl_params['m_epochs'] == 0:
                 self.update_training_sets()
-                self._ipl_params['n_l_epochs'] = -1
+                self._ipl_params['m_epochs'] = -1
                 self.trainer.reload_dataloaders_every_n_epochs = 1
 
             torch.distributed.barrier()
@@ -249,20 +251,43 @@ class IPLMixin:
                 for data_entry in update_data:
                     json.dump(data_entry, temp_manifest, ensure_ascii=False)
                     temp_manifest.write('\n')
+            if self._ipl_params.get('do_average',False):
+                avg_model = type(self)(cfg=self.cfg, trainer=None)
+                avg_model._set_model_restore_state(is_being_restored=True)
+                avg_state = self.average_checkpoints()
+                avg_model.load_state_dict(avg_state, strict=True)
+                avg_model.to("cuda")
+
             if self.model_type == "hybrid":
-                hypotheses = self.generate_pseudo_labels_hybrid(
-                    temporary_manifest,
-                    target_transcripts=transcriptions,
-                    restore_pc=self._ipl_params['restore_pc'],
-                    batch_size=self._ipl_params['batch_size'],
-                )
+                if self._ipl_params.get('do_average',False):
+                    hypotheses = avg_model.generate_pseudo_labels_hybrid(
+                        temporary_manifest,
+                        target_transcripts=transcriptions,
+                        restore_pc=self._ipl_params['restore_pc'],
+                        batch_size=self._ipl_params['batch_size'],
+                    )
+                else:  
+                    hypotheses = self.generate_pseudo_labels_hybrid(
+                        temporary_manifest,
+                        target_transcripts=transcriptions,
+                        restore_pc=self._ipl_params['restore_pc'],
+                        batch_size=self._ipl_params['batch_size'],
+                    )
             else:
-                hypotheses = self.generate_pseudo_labels_ctc(
-                    temporary_manifest,
-                    target_transcripts=transcriptions,
-                    restore_pc=self._ipl_params['restore_pc'],
-                    batch_size=self._ipl_params['batch_size'],
-                )
+                if self._ipl_params.get('do_average',False):
+                    hypotheses = avg_model.generate_pseudo_labels_ctc(
+                        temporary_manifest,
+                        target_transcripts=transcriptions,
+                        restore_pc=self._ipl_params['restore_pc'],
+                        batch_size=self._ipl_params['batch_size'],
+                    )
+                else:
+                    hypotheses = self.generate_pseudo_labels_ctc(
+                        temporary_manifest,
+                        target_transcripts=transcriptions,
+                        restore_pc=self._ipl_params['restore_pc'],
+                        batch_size=self._ipl_params['batch_size'],
+                    )
         torch.distributed.barrier()
         gathered_hypotheses = [None] * torch.distributed.get_world_size()
         gathered_data = [None] * torch.distributed.get_world_size()
@@ -272,6 +297,8 @@ class IPLMixin:
             write_cache_manifest(
                 self._ipl_params['cache_manifest'], gathered_hypotheses, gathered_data, update_whole_cache
             )
+        if self._ipl_params.get('do_average',False):
+            del avg_model, avg_state 
         torch.distributed.barrier()
 
     def create_tar_cache_hypotheses(
@@ -290,6 +317,12 @@ class IPLMixin:
             tarred_audio_filepaths = [[tarred_audio_filepaths]]
 
         self._ipl_params['cache_manifest'] = []
+        if self._ipl_params.get('do_average',False):
+            avg_model = type(self)(cfg=self.cfg, trainer=None)
+            avg_model._set_model_restore_state(is_being_restored=True)
+            avg_state = self.average_checkpoints()
+            avg_model.load_state_dict(avg_state, strict=True)
+            avg_model.to("cuda")
         for manifest, tarred_audio_filepath in zip(manifests, tarred_audio_filepaths):
             with tempfile.TemporaryDirectory() as tmpdir:
                 torch.distributed.barrier()
@@ -333,31 +366,89 @@ class IPLMixin:
                     )
                 else:
                     expanded_audio = expanded_audio[0]
+
                 if self.model_type == "hybrid":
-                    hypotheses = self.generate_pseudo_labels_hybrid(
-                        cache_manifest=temporary_manifest,
-                        tarred_audio_filepaths=expanded_audio,
-                        target_transcripts=None,
-                        restore_pc=self._ipl_params['restore_pc'],
-                        batch_size=self._ipl_params['batch_size'],
-                    )
+                    if self._ipl_params.get('do_average',False):
+
+                        hypotheses = avg_model.generate_pseudo_labels_hybrid(
+                                cache_manifest=temporary_manifest,
+                                tarred_audio_filepaths=expanded_audio,
+                                target_transcripts=None,
+                                restore_pc=self._ipl_params['restore_pc'],
+                                batch_size=self._ipl_params['batch_size'],
+                            )
+                    else:
+                        hypotheses = self.generate_pseudo_labels_hybrid(
+                            cache_manifest=temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=None,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
                 else:
-                    hypotheses = self.generate_pseudo_labels_ctc(
-                        cache_manifest=temporary_manifest,
-                        tarred_audio_filepaths=expanded_audio,
-                        target_transcripts=transcriptions,
-                        restore_pc=self._ipl_params['restore_pc'],
-                        batch_size=self._ipl_params['batch_size'],
-                    )
-                
+                    if self._ipl_params.get('do_average',False):
+
+                        hypotheses = avg_model.generate_pseudo_labels_ctc(
+                            cache_manifest=temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
+                    else:
+                        hypotheses = self.generate_pseudo_labels_ctc(
+                            cache_manifest=temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
                 write_tar_cache_manifest(
                     cache_manifest,
                     update_data=shard_manifest_data,
                     hypotheses=hypotheses,
                     use_lhotse=self.cfg.train_ds.get('use_lhotse', False),
                 )
+                
                 torch.distributed.barrier()
                 self._ipl_params['cache_manifest'].append(cache_manifest)
+        if self._ipl_params.get('do_average',False):
+            del avg_model, avg_state 
+        torch.cuda.empty_cache()
+    def average_checkpoints(self):
+        model_folder_path = self._ipl_params["path_to_model"]
+
+        ckpts = [
+            os.path.join(model_folder_path, f)
+            for f in os.listdir(model_folder_path)
+            if f.endswith(".ckpt") and not f.endswith("-last.ckpt")
+        ]
+        n = len(ckpts)
+        if n == 0:
+            raise RuntimeError("No checkpoints found to average!")
+
+        logging.info(f"Averaging {n} checkpoints …")
+        avg_state = None
+
+        for ix, path in enumerate(tqdm(ckpts, desc="Averaging")):
+            # weights_only=True avoids loading trainer/optimizer pickles
+            chk = torch.load(path, map_location="cpu", weights_only=False)
+
+            # some NeMo ckpts wrap the tensors under "state_dict"
+            chk = chk["state_dict"] if "state_dict" in chk else chk
+
+            if ix == 0:
+                avg_state = chk
+            else:
+                for k in avg_state:
+                    avg_state[k] += chk[k]
+
+        for k, v in avg_state.items():
+            if not torch.is_floating_point(v):       # e.g. num_batches_tracked
+                continue
+            avg_state[k] = v / n
+
+        return avg_state
 
     def update_tar_cache_hypotheses(
         self, manifests: Union[List[List[str]], str], tarred_audio_filepaths: Union[List[List[str]], str]
@@ -375,6 +466,13 @@ class IPLMixin:
             tarred_audio_filepaths = [[tarred_audio_filepaths]]
 
         torch.distributed.barrier()
+        if self._ipl_params.get('do_average',False):
+            avg_model = type(self)(cfg=self.cfg, trainer=None)
+            avg_model._set_model_restore_state(is_being_restored=True)
+            avg_state = self.average_checkpoints()
+            avg_model.load_state_dict(avg_state, strict=True)
+            avg_model.to("cuda")
+            
         for manifest, tarred_audio_filepath in zip(manifests, tarred_audio_filepaths):
             with tempfile.TemporaryDirectory() as tmpdir:
                 expanded_audio = expand_sharded_filepaths(
@@ -415,21 +513,40 @@ class IPLMixin:
                 else:
                     expanded_audio = expanded_audio[0]
                 if self.model_type == "hybrid":
-                    hypotheses = self.generate_pseudo_labels_hybrid(
-                        temporary_manifest,
-                        tarred_audio_filepaths=expanded_audio,
-                        target_transcripts=transcriptions,
-                        restore_pc=self._ipl_params['restore_pc'],
-                        batch_size=self._ipl_params['batch_size'],
-                    )
+                    if self._ipl_params.get('do_average',False):
+                        hypotheses = avg_model.generate_pseudo_labels_hybrid(
+                            temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
+                    else:
+                        hypotheses = self.generate_pseudo_labels_hybrid(
+                            temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
                 else:
-                    hypotheses = self.generate_pseudo_labels_ctc(
-                        temporary_manifest,
-                        tarred_audio_filepaths=expanded_audio,
-                        target_transcripts=transcriptions,
-                        restore_pc=self._ipl_params['restore_pc'],
-                        batch_size=self._ipl_params['batch_size'],
-                    )
+                    if self._ipl_params.get('do_average',False):
+                        hypotheses = avg_model.generate_pseudo_labels_ctc(
+                            temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
+                    else:
+                        hypotheses = self.generate_pseudo_labels_ctc(
+                            temporary_manifest,
+                            tarred_audio_filepaths=expanded_audio,
+                            target_transcripts=transcriptions,
+                            restore_pc=self._ipl_params['restore_pc'],
+                            batch_size=self._ipl_params['batch_size'],
+                        )
+            
             write_tar_cache_manifest(
                 manifest,
                 update_data=shard_manifest_data,
@@ -438,8 +555,11 @@ class IPLMixin:
                 update_size=update_size,
                 use_lhotse=self.cfg.train_ds.get('use_lhotse', False),
             )
-            torch.distributed.barrier()
 
+            torch.distributed.barrier()
+        if self._ipl_params.get('do_average',False):
+            del avg_model, avg_state 
+        torch.cuda.empty_cache()
     def combine_cache_hypotheses(self):
         """
         For each dataset combines cache hypotheses from manifests into one final cache manifest.
@@ -468,7 +588,7 @@ class IPLMixin:
                     base_file_name = file_name.rsplit('_', 1)[0]
                     dataset_manifests = os.path.join(base_path, f"{base_file_name}_{{{0}..{num_manifests-1}}}.json")
                     final_cache_manifests.append([dataset_manifests])
-
+    
         return final_cache_manifests
 
     def generate_pseudo_labels_hybrid(
