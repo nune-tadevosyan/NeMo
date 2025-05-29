@@ -59,7 +59,11 @@ It introduces a flexible training mechanism where you can enable Iterative Pseud
     </ul>
   </li>
   <li>⚙️ This approach is compatible with <code>nemo-run</code>, and the generated commands can be submitted as separate jobs.</li>
-  <li>🔗 See: <a href="https://github.com/NVIDIA/NeMo/tree/main/examples/asr/speech_data_processing" target="_blank">Speech Data Processing Examples</a></li>
+  <li>🔗 See: <a href="https://github.com/NVIDIA/NeMo-speech-data-processor/pull/121" target="_blank">Speech Data Processing Examples</a></li>
+  <li>📦 When using the Speech Data Processing approach to run training, you must include the <code>IPLCallback</code> from NeMo by passing it to <code>exp_manager</code> as a callback.
+    <br>
+    🔗 See: <a href="https://github.com/NVIDIA/NeMo/pull/13671" target="_blank">IPL Callback in NeMo</a>
+  </li>
 </ul>
 
 # **NVIDIA NeMo Framework**
