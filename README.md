@@ -9,62 +9,7 @@
 
 <h2>🔁 TopIPL: Iterative Pseudo-Labeling for ASR</h2>
 
-<p>This repository includes the <strong>TopIPL</strong> implementation for <em>Automatic Speech Recognition (ASR)</em>.<br>
-It introduces a flexible training mechanism where you can enable Iterative Pseudo-Labeling simply by modifying the config file – no code changes required.</p>
-
-<h3>🛠️ How to Enable TopIPL in Config</h3>
-
-<p>To get started, add the following block under <code>ipl:</code> in your experiment config:</p>
-
-<pre><code>ipl:
-  n_epochs: &lt;int&gt;            # Number of epochs before first pseudo-label generation
-  restore_pc: &lt;bool&gt;         # Whether to restore pseudo-labels if they already exist (default: False)
-  manifest_filepath: &lt;str&gt;   # Path to the original dataset manifest
-  tarred_audio_filepaths: &lt;str&gt; # Path to tarred audio files (if applicable)
-  is_tarred: &lt;bool&gt;          # Whether the dataset is tarred
-  dataset_weights: &lt;float|list&gt; # Fraction or weights of dataset to use (non-tar only, default: 1)
-  limit_train_batches: &lt;int&gt; # Used only for Lhotse-style manifests during training with PLs
-  cache_manifest: &lt;str&gt;      # Path to the cached manifest file
-  m_epochs: 0                # Deprecated: use `max_steps` to control training instead
-  p_cache: &lt;float&gt;           # Probability to update pseudo-label cache
-  cache_prefix: &lt;str&gt;        # Prefix for saved cache files
-  batch_size: &lt;int&gt;          # Batch size for generating pseudo-labels
-  do_average: &lt;bool&gt;         # If True, average multiple checkpoints for PL generation
-  path_to_model: &lt;str&gt;       # Checkpoint paths to average (required if `do_average` is True)
-</code></pre>
-
-
-<h3>📌 Notes</h3>
-<ul>
-  <li>✅ Current implementation supports <strong>Hybrid</strong> and <strong>CTC</strong> models.</li>
-  <li>⚙️ You can extend this to any other ASR model by inheriting from <code>IPLMixin</code>.</li>
-  <li>🧾 For training with <strong>tarred datasets using Lhotse</strong>, make sure to:
-    <ul>
-      <li>Set <code>skip_manifest_entries: True</code> in the config.</li>
-    </ul>
-  </li>
-  <li>⏱️ The <code>max_steps</code> parameter should be set explicitly to ensure the learning rate scheduler behaves correctly. This applies to all training modes.</li>
-</ul>
-
-
-<h3>💡 Additional Considerations</h3>
-<ul>
-  <li>⚠️ In <strong>extensive data settings</strong>, this in-place implementation may cause memory issues (though this was not observed during our internal experiments).</li>
-  <li>🧪 To avoid such issues, we recommend using an alternative implementation available in the <strong>Speech Data Processing</strong> examples. 
-    This version:
-    <ul>
-      <li>Stops training after a warm-up phase,</li>
-      <li>Generates pseudo-labels offline,</li>
-      <li>And restarts training with the updated labels.</li>
-    </ul>
-  </li>
-  <li>⚙️ This approach is compatible with <code>nemo-run</code>, and the generated commands can be submitted as separate jobs.</li>
-  <li>🔗 See: <a href="https://github.com/NVIDIA/NeMo-speech-data-processor/pull/121" target="_blank">Speech Data Processing Examples</a></li>
-  <li>📦 When using the Speech Data Processing approach to run training, you must include the <code>IPLCallback</code> from NeMo by passing it to <code>exp_manager</code> as a callback.
-    <br>
-    🔗 See: <a href="https://github.com/NVIDIA/NeMo/pull/13671" target="_blank">IPL Callback in NeMo</a>
-  </li>
-</ul>
+<p>This repository includes the <strong>TopIPL</strong> implementation for <em>Automatic Speech Recognition (ASR)</em>. See branch TopIPL.<br>
 
 # **NVIDIA NeMo Framework**
 ## Latest News
