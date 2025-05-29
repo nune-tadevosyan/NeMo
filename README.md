@@ -53,7 +53,7 @@ It introduces a flexible training mechanism where you can enable Iterative Pseud
   <li>🧪 To avoid such issues, we recommend using an alternative implementation available in the <strong>Speech Data Processing</strong> examples. 
     This version:
     <ul>
-      <li>Stops training after a warm-up phase,</li>
+      <li>Stops training at the end of each epoch,</li>
       <li>Generates pseudo-labels offline,</li>
       <li>And restarts training with the updated labels.</li>
     </ul>
