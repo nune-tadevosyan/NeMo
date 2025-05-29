@@ -14,8 +14,12 @@ It introduces a flexible training mechanism where you can enable Iterative Pseud
 
 <h3>🛠️ How to Enable TopIPL in Config</h3>
 
-<p>To get started, add the following block under <code>ipl:</code> in your experiment config:</p>
-
+<p>To get started, add the following block under <code>ipl:</code> in your experiment config. 
+You can refer to an example configuration here: 
+<a href="https://github.com/nune-tadevosyan/NeMo/blob/TopIPL/examples/asr/conf/fastconformer/hybrid_transducer_ctc/fastconformer_hybrid_transducer_ctc_bpe.yaml" target="_blank">
+fastconformer_hybrid_transducer_ctc_bpe.yaml
+</a>.
+</p>
 <pre><code>ipl:
   n_epochs: &lt;int&gt;            # Number of epochs before first pseudo-label generation
   restore_pc: &lt;bool&gt;         # Whether to restore pseudo-labels if they already exist (default: False)
@@ -33,6 +37,11 @@ It introduces a flexible training mechanism where you can enable Iterative Pseud
   path_to_model: &lt;str&gt;       # Checkpoint paths to average (required if `do_average` is True)
 </code></pre>
 
+<p>
+  Then you can run the training using the following script:
+  <code>examples/asr/asr_hybrid_transducer_ctc/speech_to_text_hybrid_rnnt_ctc_bpe.py</code>, 
+  passing your config file as a parameter.
+</p>
 
 <h3>📌 Notes</h3>
 <ul>
