@@ -1031,8 +1031,11 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 assert char != self.blank_id, "Offsets should not contain blank tokens"
                 chars_tokens.append(self.decode_ids_to_tokens([int(char)])[0])
                 chars_text.append(self.decode_ids_to_str([int(char)]))
+                chars_tokens_id = int(char)
             char_offsets[i]["char"] = chars_text
             encoded_char_offsets[i]["char"] = chars_tokens
+            #Providing this to get word offsets in merged hypotheses after chunking
+            char_offsets[i]["token_id"] = chars_tokens_id
 
         encoded_char_offsets, char_offsets = self._refine_timestamps(
             encoded_char_offsets, char_offsets, self.supported_punctuation
