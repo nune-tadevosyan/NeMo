@@ -304,9 +304,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                     self.cfg.decoding.preserve_alignments = True
                     if override_config.enable_chunking:
                         self.cfg.decoding.rnnt_timestamp_type = 'char'
-                    else:
-                        #Support the same timestamps ('word' and 'segment') with and without chunking
-                        self.cfg.decoding.rnnt_timestamp_type = ['word', 'segment']
             else:
                 return_hypotheses = False
                 if self.cfg.decoding.get("compute_timestamps", None) is not False:
@@ -344,7 +341,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         )
         
         if override_config.enable_chunking:
-            results = merge_all_hypotheses(results, override_config.timestamps, self.encoder.subsampling_factor)
+            results = merge_all_hypotheses(results, override_config.timestamps, self.encoder.subsampling_factor, is_rnnt=True)
         return results
 
 
@@ -1005,13 +1002,14 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 decoding=self.decoding,
+                is_rnnt=True
             )
             # Inject the id of the cut to hypothese to later be used for separate batches
             setattr(merged_hypotheses, 'id', cuts[0].id.split("-", 1)[0])
             return [merged_hypotheses]
 
         if trcfg.enable_chunking and len(hyp) == 1:
-            hyp = update_timestamps(hyp[0].timestamp['char'], hyp[0], self.decoding)   
+            hyp = update_timestamps(hyp[0].timestamp['char'], hyp[0], self.decoding, is_rnnt=True)   
             cuts = outputs.pop('cuts')
             setattr(hyp[0], 'id', cuts[0].id.split("-", 1)[0])
         return hyp    
