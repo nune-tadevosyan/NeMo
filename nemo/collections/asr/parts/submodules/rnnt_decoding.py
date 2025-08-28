@@ -1034,7 +1034,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 chars_tokens_id = int(char)
             char_offsets[i]["char"] = chars_text
             encoded_char_offsets[i]["char"] = chars_tokens
-            #Providing this to get word offsets in merged hypotheses after chunking
+            # Providing this to get word offsets in merged hypotheses after chunking
             char_offsets[i]["token_id"] = chars_tokens_id
 
         encoded_char_offsets, char_offsets = self._refine_timestamps(
