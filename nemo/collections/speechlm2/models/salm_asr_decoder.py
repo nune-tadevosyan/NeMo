@@ -88,6 +88,7 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
 
         # Load pretrained weights if provided
         if (init_from_path := self.cfg.get("init_from_path", None)) is not None:
+            init_from_path = "/home/ntadevosyan/models/nemotron_omni//qwen7b_stage2-lora256-lr3e-5-max10k-32gpu-step10002/"
             init_from_path = Path(init_from_path)
             assert init_from_path.is_dir(), "init_from_path must be a directory containing HF checkpoint"
             logging.warning(f"Loading pretrained weights from {str(init_from_path)}")
@@ -503,6 +504,7 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
 
             encoded, encoded_len = self.perception.forward_encoder(input_signal=audios, input_signal_length=audio_lens)
             asr_hyps = self.perception.transcribe_encoded(encoded=encoded, encoded_len=encoded_len)
+            from nemo.collections.asr.parts.utils.aligner_utils import get_utt_obj
             asr_tokens = [
                 torch.as_tensor(self.tokenizer.text_to_ids(f">> {hyp.text} <<" if hyp.text else ">> <<"))
                 for hyp in asr_hyps
@@ -543,7 +545,39 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
                 **generation_kwargs,
                 generation_config=generation_config,
             )
-        return answer_tokens
+        generation_config.timestamps = True
+        from nemo.collections.asr.parts.utils.aligner_utils import get_batch_variables_omni, create_char_timestamps
+
+        if generation_config.timestamps:
+            log_probs_batch, y_batch, T_batch, U_batch, utt_obj_batch, output_timestep_duration = get_batch_variables_omni(
+                hypotheses=asr_hyps,
+                model=self.perception.asr,
+                gt_text_batch=[self.tokenizer.ids_to_text(parse_hyp(answer.cpu(), generation_config.eos_token_id)).strip() for answer in answer_tokens])
+            from nemo.collections.asr.parts.utils.aligner_utils import viterbi_decoding
+            try:
+                alignments_batch = viterbi_decoding(
+                    log_probs_batch=log_probs_batch,
+                    y_batch=y_batch,
+                    T_batch=T_batch,
+                    U_batch=U_batch,
+                    viterbi_device=self.device,
+                )
+            except:
+                import pdb; pdb.set_trace()
+            results = {'timestamps': [{'segment': [], 'word': []} for _ in range(len(answer_tokens))]}
+
+            for i, (utt_obj, alignment_utt) in enumerate(zip(utt_obj_batch, alignments_batch)):
+                encoded_char_offsets = []
+                char_timestamps, utt_obj_batch[i] = create_char_timestamps(utt_obj, alignment_utt, output_timestep_duration, tokenizer=self.perception.asr.tokenizer, durations=asr_hyps[i].token_duration, timesteps=asr_hyps[i].timestamp['timestep'])
+                from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets, get_segment_offsets
+                for char_offset in char_timestamps:
+                    enc_char_offset = char_offset.copy()
+                    enc_char_offset['char'] = enc_char_offset['token']
+                    encoded_char_offsets.append(enc_char_offset)
+                results['timestamps'][i]['word'] = get_words_offsets(char_timestamps,encoded_char_offsets, decode_tokens_to_str=self.perception.asr.decoding.decode_tokens_to_str, supported_punctuation={',', '.', '!', '?'})
+                results['timestamps'][i]['segment'] = get_segment_offsets(word_offsets=results['timestamps'][i]['word'], segment_delimiter_tokens={'.', '!', '?', "..."})
+            return answer_tokens, results
+        return answer_tokens, None
 
     def configure_optimizers(self):
         return configure_optimizers(self)

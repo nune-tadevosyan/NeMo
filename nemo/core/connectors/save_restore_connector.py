@@ -169,6 +169,11 @@ class SaveRestoreConnector:
                         # Resolve the override config
                         conf = OmegaConf.to_container(conf, resolve=True)
                         conf = OmegaConf.create(conf)
+                with open_dict(conf):
+                    conf.decoding.compute_timestamps = True
+                    conf.decoding.preserve_alignments = True
+                    conf.timestamps = True
+                
                 # If override is top level config, extract just `model` from it
                 if 'model' in conf:
                     conf = conf.model

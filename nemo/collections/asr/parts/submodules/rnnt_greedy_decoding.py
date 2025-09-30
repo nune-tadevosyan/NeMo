@@ -2827,6 +2827,7 @@ class GreedyBatchedTDTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         self.durations = durations
         self.include_duration = include_duration
         self.include_duration_confidence = include_duration_confidence
+        self.forced_aligner = True
 
         # Depending on availability of `blank_as_pad` support
         # switch between more efficient batch decoding technique
@@ -2908,6 +2909,49 @@ class GreedyBatchedTDTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
     ):
         raise NotImplementedError("masked greedy-batched decode is not supported for TDT models.")
 
+    def stack_logprobs_from_alignments(self, y_sequence, alignments, num_durations, keep_dtype: bool = True):
+        """
+        alignments: list of lists of items shaped like [[(logits_tensor, id_tensor), ...], ...]
+        num_durations: number of trailing 'duration' logits to drop before softmax (can be int or ListConfig)
+        keep_dtype: if True, cast result back to original dtype (e.g., bfloat16)
+        """
+        logps = []
+        ids = []
+        
+        # Handle both int and ListConfig types for num_durations
+        duration_count = len(num_durations)
+        # Flatten the nested list structure and process all items
+        for sublist in alignments:
+            for logits, tok_id in sublist:
+                # Trim trailing duration bins (works for 1D or 2D …N x V)
+                trimmed = logits[..., :-duration_count] 
+
+                # Compute log-softmax in float32 for stability
+                if tok_id != 1024:
+                    logp32 = torch.log_softmax(trimmed.float(), dim=-1)
+                    logp = logp32.to(logits.dtype) if keep_dtype else logp32
+            
+                    logps.append(logp)
+                    ids.append(tok_id)
+
+        # Stack to a single tensor: [N, V - num_durations] (or [N, T, V - num_durations] if inputs were 2D)
+        if len(logps) == 0:
+            # If no valid logps, use the first alignment item
+            if alignments and alignments[0]:
+                first_logits, first_tok_id = alignments[0][0]
+                trimmed = first_logits[..., :-duration_count]
+                logp32 = torch.log_softmax(trimmed.float(), dim=-1)
+                stacked_logps = logp32.to(first_logits.dtype).unsqueeze(0) if keep_dtype else logp32.unsqueeze(0)
+                stacked_ids = torch.tensor([first_tok_id]).unsqueeze(0)
+            else:
+                # Fallback if alignments is completely empty
+                stacked_logps = torch.empty(0)
+                stacked_ids = torch.empty(0)
+        else:
+            stacked_logps = torch.stack(logps, dim=0)
+            stacked_ids = torch.stack(ids, dim=0)  # optional
+        return stacked_logps, stacked_ids
+
     @torch.inference_mode()
     def _greedy_decode_blank_as_pad_loop_labels(
         self,
@@ -2935,6 +2979,9 @@ class GreedyBatchedTDTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         hyps = rnnt_utils.batched_hyps_to_hypotheses(batched_hyps, alignments, batch_size=x.shape[0])
         for hyp, state_item in zip(hyps, self.decoding_computer.split_batched_state(batched_state)):
             hyp.dec_state = state_item
+            if self.preserve_alignments or self.forced_aligner:
+                stacked_logps, stacked_ids = self.stack_logprobs_from_alignments(hyp.y_sequence, hyp.alignments, num_durations=self.durations)
+                hyp.alignments = (stacked_logps.unsqueeze(0), stacked_ids.unsqueeze(0))
 
         if partial_hypotheses:
             for i, (hyp, hyp_continuation) in enumerate(zip(partial_hypotheses, hyps)):

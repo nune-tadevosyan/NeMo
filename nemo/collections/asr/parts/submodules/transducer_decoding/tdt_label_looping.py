@@ -507,10 +507,12 @@ class GreedyBatchedTDTLabelLoopingComputer(GreedyBatchedLabelLoopingComputerBase
             decoder_output = self.joint.project_prednet(decoder_output)  # do not recalculate joint projection
 
             # preserve correct states/outputs for inactive elements
+            non_blank_found_mask = torch.logical_and(active_mask_prev, labels != self._blank_index)
+            # preserve correct states/outputs for inactive elements and blank labels
             self.decoder.batch_replace_states_mask(
                 src_states=prev_state,
                 dst_states=state,
-                mask=~found_labels_mask,
+                mask=~non_blank_found_mask,
             )
             torch.where(
                 found_labels_mask.unsqueeze(-1).unsqueeze(-1), decoder_output, prev_decoder_output, out=decoder_output
