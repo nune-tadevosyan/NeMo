@@ -944,8 +944,8 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         encoded_len = outputs.pop('encoded_len')
 
         if trcfg.timestamps:
-            self.decoding.decoding.decoding_computer.include_duration=True
-            self.decoding.compute_timestamps=True
+            self.decoding.decoding.decoding_computer.include_duration = True
+            self.decoding.compute_timestamps = True
         hyp = self.decoding.rnnt_decoder_predictions_tensor(
             encoded,
             encoded_len,

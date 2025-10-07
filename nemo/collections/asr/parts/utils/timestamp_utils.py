@@ -669,14 +669,15 @@ def get_forced_aligned_timestamps_with_external_model(
 
     return main_model_predictions
 
+
 def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):
     """
     Parse hypothesis by truncating at the first EOS token.
-    
+
     Args:
         answer: Tensor containing token IDs.
         eos_tokens: List of EOS token IDs to search for.
-    
+
     Returns:
         Truncated answer tensor up to (but not including) the first EOS token,
         or the full answer if no EOS token is found.
@@ -691,17 +692,17 @@ def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):
 def get_timestamps_from_TDT(asr_hyps, answer_tokens, tokenizer, generation_config):
     """
     Generate word and segment timestamps for LLM-generated text using ASR timestamps.
-    
+
     This function aligns ASR hypotheses with LLM-generated answer tokens and transfers
     timing information from ASR to the LLM output. It creates both word-level and
     segment-level timestamps.
-    
+
     Args:
         asr_hyps: List of ASR hypothesis objects with text and timestamp attributes.
         answer_tokens: List of tensors containing LLM-generated token IDs.
         tokenizer: Tokenizer for converting token IDs to text.
         generation_config: Configuration object containing EOS token ID.
-    
+
     Returns:
         List of dictionaries, one per answer token sequence, with structure:
             [
@@ -716,31 +717,28 @@ def get_timestamps_from_TDT(asr_hyps, answer_tokens, tokenizer, generation_confi
     """
     # Extract ASR sentences
     asr_sentences = [asr_hyps[i].text for i in range(len(asr_hyps))]
-    
+
     # Parse and decode LLM sentences
     llm_sentences = [
         tokenizer.ids_to_text(parse_hyp(answer.cpu(), generation_config.eos_token_id)).strip()
         for answer in answer_tokens
     ]
-    
+
     # Align ASR and LLM sentences
     alignment = align_sentences(asr_sentences, llm_sentences)
-    
+
     # Create LLM timestamps from alignment
     llm_timestamps = create_llm_timestamps_from_alignment(
-        alignments=alignment,
-        asr_hyps=asr_hyps,
-        llm_sentences=llm_sentences
+        alignments=alignment, asr_hyps=asr_hyps, llm_sentences=llm_sentences
     )
-    
+
     # Build results with word and segment timestamps
     results = [{'timestamps': {'segment': [], 'word': []}} for _ in range(len(answer_tokens))]
-    
+
     for i, word_llm_timestamp in enumerate(llm_timestamps):
         results[i]['timestamps']['word'] = word_llm_timestamp
         results[i]['timestamps']['segment'] = get_segment_offsets(
-            word_offsets=results[i]['timestamps']['word'],
-            segment_delimiter_tokens={'.', '!', '?', '...'}
+            word_offsets=results[i]['timestamps']['word'], segment_delimiter_tokens={'.', '!', '?', '...'}
         )
-    
+
     return results

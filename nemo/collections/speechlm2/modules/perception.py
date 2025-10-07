@@ -268,8 +268,8 @@ class AudioTranscriptionPerceptionModule(NeuralModule, Exportable):
         if isinstance(encoded, list):
             encoded = encoded[-1]
             encoded_len = encoded_len[-1]
-      
-        trcfg=TranscribeConfig()
+
+        trcfg = TranscribeConfig()
         if timestamps:
             trcfg.timestamps = True
             trcfg.return_hypotheses = True
@@ -277,7 +277,6 @@ class AudioTranscriptionPerceptionModule(NeuralModule, Exportable):
         return self.asr._transcribe_output_processing(
             outputs={"encoded": encoded, "encoded_len": encoded_len}, trcfg=trcfg
         )
-
 
     # disable type checks to avoid type-check errors when using Conformer as modality adapter
     @typecheck.disable_checks()

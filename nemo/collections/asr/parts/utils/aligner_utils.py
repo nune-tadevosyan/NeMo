@@ -80,7 +80,6 @@ class Utterance:
     saved_output_files: dict = field(default_factory=dict)
 
 
-
 def is_sub_or_superscript_pair(ref_text, text):
     """returns True if ref_text is a subscript or superscript version of text"""
     sub_or_superscript_to_num = {
@@ -1064,9 +1063,12 @@ def get_batch_variables(
         utt_obj_batch,
         output_timestep_duration,
     )
+
+
 def word_sim(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
-    
+
+
 def align_sequences(
     ref_words: List[str],
     hyp_words: List[str],
@@ -1077,57 +1079,57 @@ def align_sequences(
 ) -> List[Tuple[Optional[int], Optional[int], float]]:
     """
     Perform global sequence alignment between reference and hypothesis word lists using the Needleman-Wunsch algorithm.
-    
+
     This function aligns two sequences of words by finding the optimal global alignment that maximizes
     the total alignment score. The alignment allows for matches, mismatches, and gaps (insertions/deletions).
     Word similarity is computed using SequenceMatcher ratio (0.0 to 1.0).
-    
+
     Args:
         ref_words: List of reference words to align.
         hyp_words: List of hypothesis words to align.
         match_reward: Reward multiplier for word pairs with similarity >= sim_threshold. Default is 1.0.
         mismatch_reward: Reward multiplier for word pairs with similarity < sim_threshold. Default is 0.0.
-        gap_penalty: Penalty score for introducing a gap (insertion or deletion) in the alignment. 
+        gap_penalty: Penalty score for introducing a gap (insertion or deletion) in the alignment.
             Should typically be negative. Default is -0.6.
         sim_threshold: Similarity threshold (0.0 to 1.0) above which word pairs are considered matches.
             Default is 0.5.
-    
+
     Returns:
         List of alignment tuples (ref_idx, hyp_idx, similarity) where:
             - ref_idx: index in ref_words (0-based), or None if this is a gap in the reference
             - hyp_idx: index in hyp_words (0-based), or None if this is a gap in the hypothesis
             - similarity: word similarity score (0.0 to 1.0) computed by word_sim(), or 0.0 for gaps
         The list represents the complete alignment from start to end of both sequences.
-    
+
     Note:
         The scoring function used is:
             - For aligned word pairs: match_reward * sim if sim >= sim_threshold, else mismatch_reward * sim
             - For gaps: gap_penalty (constant per gap)
-        
+
         The algorithm uses dynamic programming with O(n*m) time and space complexity, where n and m
         are the lengths of ref_words and hyp_words respectively.
     """
     n, m = len(ref_words), len(hyp_words)
     # DP score and backpointers: 0=diag(M), 1=up(D), 2=left(I)
-    dp = [[0.0]*(m+1) for _ in range(n+1)]
-    bp = [[-1]*(m+1) for _ in range(n+1)]
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+    bp = [[-1] * (m + 1) for _ in range(n + 1)]
 
     # init
-    for i in range(1, n+1):
-        dp[i][0] = dp[i-1][0] + gap_penalty
+    for i in range(1, n + 1):
+        dp[i][0] = dp[i - 1][0] + gap_penalty
         bp[i][0] = 1  # deletion
-    for j in range(1, m+1):
-        dp[0][j] = dp[0][j-1] + gap_penalty
+    for j in range(1, m + 1):
+        dp[0][j] = dp[0][j - 1] + gap_penalty
         bp[0][j] = 2  # insertion
 
     # fill
-    for i in range(1, n+1):
-        for j in range(1, m+1):
-            sim = word_sim(ref_words[i-1], hyp_words[j-1])
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            sim = word_sim(ref_words[i - 1], hyp_words[j - 1])
             match_score = (match_reward if sim >= sim_threshold else mismatch_reward) * sim
-            s_diag = dp[i-1][j-1] + match_score      # M
-            s_up   = dp[i-1][j]   + gap_penalty      # D
-            s_left = dp[i][j-1]   + gap_penalty      # I
+            s_diag = dp[i - 1][j - 1] + match_score  # M
+            s_up = dp[i - 1][j] + gap_penalty  # D
+            s_left = dp[i][j - 1] + gap_penalty  # I
             best = max((s_diag, 0), (s_up, 1), (s_left, 2), key=lambda x: x[0])
             dp[i][j], bp[i][j] = best
 
@@ -1137,17 +1139,18 @@ def align_sequences(
     while i > 0 or j > 0:
         move = bp[i][j]
         if move == 0:  # M
-            sim = word_sim(ref_words[i-1], hyp_words[j-1])
-            alignment.append((i-1, j-1, sim))
-            i, j = i-1, j-1
+            sim = word_sim(ref_words[i - 1], hyp_words[j - 1])
+            alignment.append((i - 1, j - 1, sim))
+            i, j = i - 1, j - 1
         elif move == 1:  # D (gap in hyp)
-            alignment.append((i-1, None, 0.0))
+            alignment.append((i - 1, None, 0.0))
             i -= 1
         else:  # 2 or start-case → I (gap in ref)
-            alignment.append((None, j-1, 0.0))
+            alignment.append((None, j - 1, 0.0))
             j -= 1
     alignment.reverse()
     return alignment
+
 
 def align_sentences(
     ref_sentences: List[str],
@@ -1159,32 +1162,34 @@ def align_sentences(
 ) -> List[List[Tuple[Optional[int], Optional[int], float]]]:
     """
     Align sentences by splitting them into words and running word alignment on each pair.
-    
+
     Args:
         ref_sentences: List of reference sentences
-        hyp_sentences: List of hypothesis sentences  
+        hyp_sentences: List of hypothesis sentences
         match_reward: Reward for matching words above similarity threshold
         mismatch_reward: Reward for matching words below similarity threshold
         gap_penalty: Penalty for gaps in alignment
         sim_threshold: Similarity threshold for considering words as matches
-        
+
     Returns:
         List of alignments, one for each sentence pair. Each alignment is a list of
         (ref_word_idx, hyp_word_idx, similarity) tuples where indices can be None for gaps.
     """
     if len(ref_sentences) != len(hyp_sentences):
-        raise ValueError(f"Number of reference sentences ({len(ref_sentences)}) must match "
-                        f"number of hypothesis sentences ({len(hyp_sentences)})")
-    
+        raise ValueError(
+            f"Number of reference sentences ({len(ref_sentences)}) must match "
+            f"number of hypothesis sentences ({len(hyp_sentences)})"
+        )
+
     alignments = []
-    #normalizer = EnglishTextNormalizer()
+    # normalizer = EnglishTextNormalizer()
     for ref_sentence, hyp_sentence in zip(ref_sentences, hyp_sentences):
         # Split sentences into words
-        #ref_sentence = normalizer(ref_sentence)
-        #hyp_sentence = normalizer(hyp_sentence)
+        # ref_sentence = normalizer(ref_sentence)
+        # hyp_sentence = normalizer(hyp_sentence)
         ref_words = ref_sentence.split()
         hyp_words = hyp_sentence.split()
-        
+
         # Run word alignment on this sentence pair
         sentence_alignment = align_sequences(
             ref_words=ref_words,
@@ -1192,27 +1197,25 @@ def align_sentences(
             match_reward=match_reward,
             mismatch_reward=mismatch_reward,
             gap_penalty=gap_penalty,
-            sim_threshold=sim_threshold
+            sim_threshold=sim_threshold,
         )
-        
+
         alignments.append(sentence_alignment)
-    
+
     return alignments
 
 
 def create_llm_timestamps_from_alignment(
-    alignments: List[List[Tuple[Optional[int], Optional[int], float]]],
-    asr_hyps: List,
-    llm_sentences: List[str]
+    alignments: List[List[Tuple[Optional[int], Optional[int], float]]], asr_hyps: List, llm_sentences: List[str]
 ) -> List[List[Dict[str, Union[str, float]]]]:
     """
     Create word-level timestamps for LLM-generated transcript using alignment results and ASR timestamps.
-    
+
     This function takes alignment results between ASR and LLM transcripts and transfers the timing
     information from ASR word timestamps to the corresponding LLM words. For LLM words without direct
     alignment, it attempts to find containing words in the ASR output and splits timestamp proportionally.
     For ASR words that are part of previous LLM words, it updates the boundaries of those LLM words.
-    
+
     Args:
         alignments: List of alignment results from align_sentences, one per sentence pair. Each alignment
             is a list of tuples (ref_idx, hyp_idx, similarity) where ref_idx is the ASR word index,
@@ -1221,7 +1224,7 @@ def create_llm_timestamps_from_alignment(
             attribute containing a 'word' key with word-level timestamp dictionaries, and a 'text'
             attribute with the transcribed text.
         llm_sentences: List of LLM-generated transcript sentences as strings.
-        
+
     Returns:
         List of word timestamp lists, one per LLM sentence. Each word timestamp is a dictionary with:
             - 'word': str - the LLM word
@@ -1231,10 +1234,10 @@ def create_llm_timestamps_from_alignment(
             - 'end_offset': int - end character offset in the audio
             - 'similarity': float (optional) - similarity score for partial matches
         Words without alignment get timestamps based on the previous word's end time, or 0.0 if first word.
-    
+
     Raises:
         ValueError: If the lengths of alignments, asr_hyps, and llm_sentences do not match.
-    
+
     Note:
         The function handles several alignment scenarios:
         1. Direct alignment: LLM word aligned to ASR word - copies ASR timestamps
@@ -1243,20 +1246,27 @@ def create_llm_timestamps_from_alignment(
         4. No match found: Uses previous word's end time or 0.0 for first word
     """
     if len(alignments) != len(asr_hyps) or len(alignments) != len(llm_sentences):
-        raise ValueError(f"Length mismatch: alignments({len(alignments)}), "
-                        f"asr_hyps({len(asr_hyps)}), llm_sentences({len(llm_sentences)})")
-    
-    def find_containing_word(target_word: str, candidate_words: List[str], candidate_timestamps: List[Dict], similarity_threshold: float = 0.7) -> Optional[Tuple[int, Dict, str, float]]:
+        raise ValueError(
+            f"Length mismatch: alignments({len(alignments)}), "
+            f"asr_hyps({len(asr_hyps)}), llm_sentences({len(llm_sentences)})"
+        )
+
+    def find_containing_word(
+        target_word: str,
+        candidate_words: List[str],
+        candidate_timestamps: List[Dict],
+        similarity_threshold: float = 0.7,
+    ) -> Optional[Tuple[int, Dict, str, float]]:
         """
         Find if target_word is contained in any of the candidate words with similarity above threshold, this is done
         when target_word is not aligned to any of the candidate words.
-        
+
         Args:
             target_word: The word to search for (typically an LLM word).
             candidate_words: List of words to search within (typically ASR words).
             candidate_timestamps: List of timestamp dictionaries corresponding to candidate_words.
             similarity_threshold: Minimum similarity score (0.0 to 1.0) to consider a match. Default is 0.7.
-        
+
         Returns:
             Tuple of (index, timestamp, candidate_word, similarity) for the best match, or None if no
             match is found above the threshold. The tuple contains:
@@ -1267,76 +1277,76 @@ def create_llm_timestamps_from_alignment(
         """
         best_match = None
         best_similarity = 0.0
-        
+
         for i, (candidate_word, timestamp) in enumerate(zip(candidate_words, candidate_timestamps)):
             # Check if target_word is similar to the beginning or end of candidate_word
             target_lower = target_word.lower()
             candidate_lower = candidate_word.lower()
-            
+
             # Calculate similarity for containment (target in candidate)
             if len(candidate_lower) >= len(target_lower):
                 # Check similarity at the beginning
-                prefix_sim = word_sim(target_lower, candidate_lower[:len(target_lower)])
-                # Check similarity at the end  
-                suffix_sim = word_sim(target_lower, candidate_lower[-len(target_lower):])
+                prefix_sim = word_sim(target_lower, candidate_lower[: len(target_lower)])
+                # Check similarity at the end
+                suffix_sim = word_sim(target_lower, candidate_lower[-len(target_lower) :])
                 # Check overall containment similarity
                 containment_sim = max(prefix_sim, suffix_sim)
-                
+
                 if containment_sim >= similarity_threshold and containment_sim > best_similarity:
                     best_similarity = containment_sim
                     best_match = (i, timestamp, candidate_word, containment_sim)
-            
+
             # Also check if candidate is similar to target (candidate in target)
             if len(target_lower) >= len(candidate_lower):
                 # Check similarity at the beginning
-                prefix_sim = word_sim(candidate_lower, target_lower[:len(candidate_lower)])
+                prefix_sim = word_sim(candidate_lower, target_lower[: len(candidate_lower)])
                 # Check similarity at the end
-                suffix_sim = word_sim(candidate_lower, target_lower[-len(candidate_lower):])
+                suffix_sim = word_sim(candidate_lower, target_lower[-len(candidate_lower) :])
                 # Check overall containment similarity
                 containment_sim = max(prefix_sim, suffix_sim)
-                
+
                 if containment_sim >= similarity_threshold and containment_sim > best_similarity:
                     best_similarity = containment_sim
                     best_match = (i, timestamp, candidate_word, containment_sim)
-        
+
         return best_match
 
     def is_word_at_beginning(target_word: str, containing_word: str, similarity_threshold: float = 0.7) -> bool:
         """
         Check if target_word appears at the beginning of containing_word with similarity above threshold.
-        
+
         This helper function determines whether a target word is located at the start of a containing
         word by comparing the target word to the beginning portion of the containing word.
-        
+
         Args:
             target_word: The word to check for (typically an LLM word).
             containing_word: The word that may contain target_word at its beginning (typically an ASR word).
             similarity_threshold: Minimum similarity score (0.0 to 1.0) to consider a match. Default is 0.7.
-        
+
         Returns:
             True if target_word appears at the beginning of containing_word with similarity >= threshold,
             False otherwise.
         """
         target_lower = target_word.lower()
         containing_lower = containing_word.lower()
-        
+
         if len(containing_lower) < len(target_lower):
             return False
-        
+
         # Extract the beginning portion of containing_word that matches target_word length
-        beginning_portion = containing_lower[:len(target_lower)]
+        beginning_portion = containing_lower[: len(target_lower)]
         similarity = word_sim(target_lower, beginning_portion)
-        
+
         return similarity >= similarity_threshold
 
     def split_timestamp(timestamp: Dict, target_word: str, containing_word: str, is_first_part: bool) -> Dict:
         """
         Split a timestamp proportionally based on word position within a containing word.
-        
+
         When an LLM word corresponds to only part of an ASR word, this function splits the ASR word's
         timestamp proportionally based on the character lengths of the words. The split is linear,
         assuming uniform speaking rate within the word.
-        
+
         Args:
             timestamp: The original timestamp dictionary from the containing ASR word, with keys:
                 'start', 'end', 'start_offset', 'end_offset'.
@@ -1344,7 +1354,7 @@ def create_llm_timestamps_from_alignment(
             containing_word: The ASR word that contains the target word.
             is_first_part: If True, target_word is at the beginning of containing_word (gets start to middle).
                 If False, target_word is at the end of containing_word (gets middle to end).
-        
+
         Returns:
             Dictionary with timestamp information for the target word:
                 - 'word': str - the target word
@@ -1353,7 +1363,7 @@ def create_llm_timestamps_from_alignment(
                 - 'start_offset': int - start character offset
                 - 'end_offset': int - end character offset
                 - 'similarity': float - set to 0.8 to indicate partial match
-        
+
         Note:
             The split is proportional to character length: if target_word is 40% of containing_word's
             length, it gets 40% of the duration.
@@ -1362,18 +1372,18 @@ def create_llm_timestamps_from_alignment(
         end_time = timestamp.get('end', 0.0)
         start_offset = timestamp.get('start_offset', 0)
         end_offset = timestamp.get('end_offset', 0)
-        
+
         # Calculate proportional split based on character length
         target_len = len(target_word)
         containing_len = len(containing_word)
-        
+
         if containing_len == 0:
             return timestamp
-            
+
         ratio = target_len / containing_len
         duration = end_time - start_time
         offset_duration = end_offset - start_offset
-        
+
         if is_first_part:
             # First part gets start to middle
             new_end_time = start_time + (duration * ratio)
@@ -1396,66 +1406,68 @@ def create_llm_timestamps_from_alignment(
                 'start_offset': new_start_offset,
                 'end_offset': end_offset,
             }
-    
-    def check_if_asr_word_in_previous_llm_word(asr_word: str, previous_llm_word: str, similarity_threshold: float = 0.6) -> Optional[str]:
+
+    def check_if_asr_word_in_previous_llm_word(
+        asr_word: str, previous_llm_word: str, similarity_threshold: float = 0.6
+    ) -> Optional[str]:
         """
         Check if an ASR word is contained in the previous LLM word and return its position.
-        
+
         This helper function determines whether an unaligned ASR word is actually part of the previous
         LLM word by checking for similarity at the beginning or end of the LLM word. This handles cases
         where the LLM combines multiple ASR words or uses different word boundaries.
-        
+
         Args:
             asr_word: The ASR word to check for containment.
             previous_llm_word: The previous LLM word that may contain asr_word.
             similarity_threshold: Minimum similarity score (0.0 to 1.0) to consider a match. Default is 0.6.
-        
+
         Returns:
             'start' if asr_word appears at the beginning of previous_llm_word,
             'end' if asr_word appears at the end of previous_llm_word,
             None if asr_word is not found in previous_llm_word or if previous_llm_word is empty.
-        
+
         Note:
             This function is used to update the boundaries of the previous LLM word's timestamp when
             an ASR word is found to be part of it.
         """
         if not previous_llm_word:
             return None
-            
+
         asr_lower = asr_word.lower()
         llm_lower = previous_llm_word.lower()
-        
+
         # Check if ASR word is at the beginning of LLM word
         if len(llm_lower) >= len(asr_lower):
-            beginning_portion = llm_lower[:len(asr_lower)]
+            beginning_portion = llm_lower[: len(asr_lower)]
             if word_sim(asr_lower, beginning_portion) >= similarity_threshold:
                 return 'start'
-        
+
         # Check if ASR word is at the end of LLM word
         if len(llm_lower) >= len(asr_lower):
-            ending_portion = llm_lower[-len(asr_lower):]
+            ending_portion = llm_lower[-len(asr_lower) :]
             if word_sim(asr_lower, ending_portion) >= similarity_threshold:
                 return 'end'
-        
+
         return None
-    
+
     llm_timestamps = []
-    
+
     for sent_idx, (alignment, asr_hyp, llm_sentence) in enumerate(zip(alignments, asr_hyps, llm_sentences)):
         # Get ASR word timestamps for this sentence
         asr_word_timestamps = asr_hyp.timestamp.get('word', []) if hasattr(asr_hyp, 'timestamp') else []
         asr_words = asr_hyp.text.split() if hasattr(asr_hyp, 'text') else []
-        
+
         # Split LLM sentence into words
         llm_words = llm_sentence.split()
-        
+
         # Initialize LLM word timestamps
         sentence_timestamps = []
-        is_first_part=None
+        is_first_part = None
         for ref_idx, hyp_idx, similarity in alignment:
             if hyp_idx is not None:  # LLM word exists
                 llm_word = llm_words[hyp_idx]
-                
+
                 if ref_idx is not None and ref_idx < len(asr_word_timestamps):
                     # Aligned word - use ASR timestamp
                     asr_timestamp = asr_word_timestamps[ref_idx]
@@ -1477,20 +1489,20 @@ def create_llm_timestamps_from_alignment(
                             'start_offset': asr_timestamp.get('start_offset', 0),
                             'end_offset': asr_timestamp.get('end_offset', 0),
                         }
-                
+
                 else:
                     # LLM word with no ASR alignment - try to find containing word
-                    containing_result = find_containing_word(llm_word, asr_words, asr_word_timestamps, similarity_threshold=0.6)
-                    
+                    containing_result = find_containing_word(
+                        llm_word, asr_words, asr_word_timestamps, similarity_threshold=0.6
+                    )
+
                     if containing_result is not None:
                         containing_idx, containing_timestamp, containing_word, match_similarity = containing_result
-                        
+
                         # Determine if this is first or second part using similarity threshold
                         is_first_part = is_word_at_beginning(llm_word, containing_word, similarity_threshold=0.6)
-                        
-                        llm_timestamp = split_timestamp(
-                            containing_timestamp, llm_word, containing_word, is_first_part
-                        )
+
+                        llm_timestamp = split_timestamp(containing_timestamp, llm_word, containing_word, is_first_part)
                         if sentence_timestamps:
                             sentence_timestamps[-1]['end'] = llm_timestamp.get('start', 0.0)
                             sentence_timestamps[-1]['end_offset'] = llm_timestamp.get('start_offset', 0)
@@ -1512,32 +1524,40 @@ def create_llm_timestamps_from_alignment(
                                 'start_offset': 0,
                                 'end_offset': 0,
                             }
-                
+
                 sentence_timestamps.append(llm_timestamp)
-            
+
             elif ref_idx is not None and ref_idx < len(asr_word_timestamps):
                 # ASR word exists but no corresponding LLM word
                 # Check if this ASR word might be part of the previous LLM word
                 asr_word = asr_words[ref_idx]
                 asr_timestamp = asr_word_timestamps[ref_idx]
-                
+
                 if sentence_timestamps:  # There is a previous LLM word
                     previous_llm_timestamp = sentence_timestamps[-1]
                     previous_llm_word = previous_llm_timestamp['word']
-                    
-                    position = check_if_asr_word_in_previous_llm_word(asr_word, previous_llm_word, similarity_threshold=0.6)
-                    
+
+                    position = check_if_asr_word_in_previous_llm_word(
+                        asr_word, previous_llm_word, similarity_threshold=0.6
+                    )
+
                     if position == 'start':
                         # ASR word is at the start of previous LLM word - update start timestamps
                         if sentence_timestamps:
-                            sentence_timestamps[-1]['start'] = asr_timestamp.get('start', previous_llm_timestamp['start'])
-                            sentence_timestamps[-1]['start_offset'] = asr_timestamp.get('start_offset', previous_llm_timestamp['start_offset'])
+                            sentence_timestamps[-1]['start'] = asr_timestamp.get(
+                                'start', previous_llm_timestamp['start']
+                            )
+                            sentence_timestamps[-1]['start_offset'] = asr_timestamp.get(
+                                'start_offset', previous_llm_timestamp['start_offset']
+                            )
                     elif position == 'end':
                         # ASR word is at the end of previous LLM word - update end timestamps
                         if sentence_timestamps:
                             sentence_timestamps[-1]['end'] = asr_timestamp.get('end', previous_llm_timestamp['end'])
-                            sentence_timestamps[-1]['end_offset'] = asr_timestamp.get('end_offset', previous_llm_timestamp['end_offset'])
-        
+                            sentence_timestamps[-1]['end_offset'] = asr_timestamp.get(
+                                'end_offset', previous_llm_timestamp['end_offset']
+                            )
+
         llm_timestamps.append(sentence_timestamps)
-    
+
     return llm_timestamps
