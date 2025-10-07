@@ -1177,11 +1177,11 @@ def align_sentences(
                         f"number of hypothesis sentences ({len(hyp_sentences)})")
     
     alignments = []
-    normalizer = EnglishTextNormalizer()
+    #normalizer = EnglishTextNormalizer()
     for ref_sentence, hyp_sentence in zip(ref_sentences, hyp_sentences):
         # Split sentences into words
-        ref_sentence = normalizer(ref_sentence)
-        hyp_sentence = normalizer(hyp_sentence)
+        #ref_sentence = normalizer(ref_sentence)
+        #hyp_sentence = normalizer(hyp_sentence)
         ref_words = ref_sentence.split()
         hyp_words = hyp_sentence.split()
         
