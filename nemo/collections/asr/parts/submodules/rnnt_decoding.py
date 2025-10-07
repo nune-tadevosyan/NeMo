@@ -731,7 +731,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
 
         prediction_list = hypotheses_list
-
         if isinstance(prediction_list[0], NBestHypotheses):
             hypotheses = []
             all_hypotheses = []
@@ -1027,7 +1026,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             Hypothesis: The updated hypothesis with computed timestamps for characters, words, and/or segments.
         """
         assert timestamp_type in ['char', 'word', 'segment', 'all']
-
         # Unpack the temporary storage
         decoded_prediction, alignments, token_repetitions = hypothesis.text
 

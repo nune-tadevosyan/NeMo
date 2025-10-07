@@ -51,6 +51,7 @@ class SalmEvalConfig:
     extra_eos_tokens: Optional[list[str]] = None
     system_prompt: Optional[str] = None
     user_prompt: Optional[str] = None
+    timestamps: bool = True
 
 
 @hydra_runner(config_name="SalmEvalConfig", schema=SalmEvalConfig)
@@ -98,12 +99,14 @@ def main(cfg: SalmEvalConfig):
     hyps = []
     input_durations = []
     infer_durations = []
+    hyps_timestamps = []
     for batch_idx, batch in enumerate(dloader):
         ts = perf_counter()
-        answer_ids = model.generate(
+        answer_ids, timestamps = model.generate(
             prompts=[prompt] * len(batch["cuts"]),  # identical prompt for each example
             audios=batch["audios"].to(model.device, non_blocking=True),
             audio_lens=batch["audio_lens"].to(model.device, non_blocking=True),
+            timestamps=cfg.timestamps,
             generation_config=GenerationConfig(
                 max_new_tokens=cfg.max_new_tokens,
                 bos_token_id=model.text_bos_id,
@@ -130,6 +133,7 @@ def main(cfg: SalmEvalConfig):
         hyps.extend(batch_hyps)
         input_durations.append(batch_duration)
         infer_durations.append(batch_infer_duration)
+        hyps_timestamps.extend(timestamps)
 
     wer, _, nins, ndel, nsub = word_error_rate_detail(hypotheses=hyps, references=refs, use_cer=False)
     rtfx = sum(input_durations) / sum(infer_durations)
@@ -138,8 +142,13 @@ def main(cfg: SalmEvalConfig):
 
     if cfg.output_manifest is not None:
         with SequentialJsonlWriter(cfg.output_manifest) as writer:
-            for cut, ref, hyp in zip(cuts, refs, hyps):
-                writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp})
+            for cut, ref, hyp, result in zip(cuts, refs, hyps, hyps_timestamps):
+                output_dict = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp}
+                if result is not None:
+                    output_dict["timestamp"] = result['timestamps']
+                writer.write(output_dict)
+
+
 
 
 def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from re import I
 import torch
 from omegaconf import DictConfig, open_dict
 from torch import nn
@@ -263,13 +264,20 @@ class AudioTranscriptionPerceptionModule(NeuralModule, Exportable):
             encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         return encoded, encoded_len
 
-    def transcribe_encoded(self, encoded, encoded_len):
+    def transcribe_encoded(self, encoded, encoded_len, timestamps=False):
         if isinstance(encoded, list):
             encoded = encoded[-1]
             encoded_len = encoded_len[-1]
+      
+        trcfg=TranscribeConfig()
+        if timestamps:
+            trcfg.timestamps = True
+            trcfg.return_hypotheses = True
+
         return self.asr._transcribe_output_processing(
-            outputs={"encoded": encoded, "encoded_len": encoded_len}, trcfg=TranscribeConfig()
+            outputs={"encoded": encoded, "encoded_len": encoded_len}, trcfg=trcfg
         )
+
 
     # disable type checks to avoid type-check errors when using Conformer as modality adapter
     @typecheck.disable_checks()

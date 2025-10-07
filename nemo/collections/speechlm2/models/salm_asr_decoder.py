@@ -50,6 +50,7 @@ from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, i
 from nemo.collections.speechlm2.parts.pretrained import load_pretrained_hf, move_embedding
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, MaskType, NeuralType
 from nemo.utils import logging
+from nemo.collections.asr.parts.utils.timestamp_utils import get_timestamps_from_TDT
 
 
 class SALMWithAsrDecoder(LightningModule, HFHubMixin):
@@ -81,6 +82,7 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
 
         # Load pretrained weights if provided
         if (init_from_path := self.cfg.get("init_from_path", None)) is not None:
+            init_from_path = "/home/ntadevosyan/models/nemotron_omni//qwen7b_stage2-lora256-lr3e-5-max10k-32gpu-step10002/"
             init_from_path = Path(init_from_path)
             assert init_from_path.is_dir(), "init_from_path must be a directory containing HF checkpoint"
             logging.warning(f"Loading pretrained weights from {str(init_from_path)}")
@@ -402,6 +404,7 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
         prompts: list[list[dict[str]]] | torch.Tensor,
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
+        timestamps: bool = False,
         generation_config: GenerationConfig = None,
         **generation_kwargs,
     ) -> torch.Tensor:
@@ -495,7 +498,7 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
             # audio_embeds = [audio_embeds[i, :elen] for i, elen in enumerate(audio_embed_lens)]
 
             encoded, encoded_len = self.perception.forward_encoder(input_signal=audios, input_signal_length=audio_lens)
-            asr_hyps = self.perception.transcribe_encoded(encoded=encoded, encoded_len=encoded_len)
+            asr_hyps = self.perception.transcribe_encoded(encoded=encoded, encoded_len=encoded_len, timestamps=timestamps)
             asr_tokens = [
                 torch.as_tensor(self.tokenizer.text_to_ids(f">> {hyp.text} <<" if hyp.text else ">> <<"))
                 for hyp in asr_hyps
@@ -537,7 +540,11 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
                 **generation_kwargs,
                 generation_config=generation_config,
             )
-        return answer_tokens
+        if timestamps:
+            timestamps_results = get_timestamps_from_TDT(asr_hyps, answer_tokens, self.tokenizer,generation_config)
+            return answer_tokens, timestamps_results    
+
+        return answer_tokens, None
 
     def configure_optimizers(self):
         return configure_optimizers(self)
