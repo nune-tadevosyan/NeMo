@@ -28,7 +28,7 @@ from nemo.collections.asr.parts.submodules.ngram_lm import NGramGPULanguageModel
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.core import Typing, typecheck
-from nemo.core.neural_types import ChannelType, HypothesisType, LabelsType, MaskType, NeuralType
+from nemo.core.neural_types import ChannelType, FloatType, HypothesisType, LabelsType, MaskType, NeuralType
 from nemo.utils import logging
 
 
@@ -122,7 +122,10 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
     @property
     def output_types(self):
         """Returns definitions of module output ports."""
-        return {"predictions": [NeuralType(elements_type=HypothesisType())]}
+        return {
+            "predictions": [NeuralType(elements_type=HypothesisType())],
+            "cross_attention_scores": NeuralType(elements_type=FloatType(), optional=True)
+        }
 
     def __init__(
         self,
@@ -231,7 +234,7 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
             self.transformer_decoder.eval()
             self.log_softmax_module.eval()
 
-            topk_hypotheses, beam_scores, best_hypo = self.beam_search(
+            topk_hypotheses, beam_scores, best_hypo, xatt_scores = self.beam_search(
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_input_mask=encoder_input_mask,
                 decoder_input_ids=decoder_input_ids,
@@ -261,7 +264,10 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
         self.transformer_decoder.train()
         self.log_softmax_module.train()
 
-        return (packed_result,)
+        return {
+            "predictions": (packed_result,),
+            "cross_attention_scores": xatt_scores
+        }
 
     def format_hypotheses(
         self, packed_result: List[Hypothesis | NBestHypotheses], decoder_input_ids: Union[torch.Tensor, None]
@@ -272,6 +278,7 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
         * Remove BOS, EOS, and PAD ids from the predictions.
         Modifies results in-place.
         """
+        import pdb; pdb.set_trace()
         if decoder_input_ids is not None:
             assert (
                 len(packed_result) == decoder_input_ids.shape[0]

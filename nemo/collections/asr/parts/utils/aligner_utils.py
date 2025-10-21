@@ -20,6 +20,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from typing import Tuple
+from typing import Dict
+from typing import Callable
+from typing import Optional
+from typing import Set
+from typing import Union    
+
 
 from nemo.collections.asr.models.asr_model import ASRModel
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
@@ -636,7 +643,7 @@ def add_t_start_end_to_utt_obj(utt_obj: Utterance, alignment_utt: List[int], out
     # the timestep where a token s starts is the location of the first appearance of s_start in alignment_utt
     # the timestep where a token s ends is the location of the final appearance of s_end in alignment_utt
     # We will make dictionaries num_to_first_alignment_appearance and
-    # num_to_last_appearance and use that to update all of
+    # num_to_last_alignment_appearance and use that to update all of
     # the t_start and t_end values in utt_obj.
     # We will put t_start = t_end = -1 for tokens that are skipped (should only be blanks)
 
@@ -1055,3 +1062,517 @@ def get_batch_variables(
         utt_obj_batch,
         output_timestep_duration,
     )
+import torch
+import torch.nn.functional as F
+
+def dtw_alignment(attention_matrix, return_path=True):
+    """
+    Compute DTW alignment from attention matrix.
+    
+    Args:
+        attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
+                         or [decoder_steps, encoder_steps] for single batch
+        return_path: Whether to return the optimal alignment path
+    
+    Returns:
+        cost: DTW cost
+        path: Optimal alignment path (if return_path=True)
+    """
+    if attention_matrix.dim() == 2:
+        attention_matrix = attention_matrix.unsqueeze(0)
+    
+    batch_size, M, N = attention_matrix.shape  # M=decoder_steps, N=encoder_steps
+    
+    # Convert attention scores to cost (higher attention = lower cost)
+    # You can experiment with different cost functions
+
+    #cost_matrix = -torch.log(attention_matrix + 1e-8)
+    from scipy.ndimage import median_filter
+    attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 9))
+    attention_matrix = torch.tensor(attention_matrix * 1).softmax(dim=-1)
+    attention_matrix = attention_matrix.mean(axis=(0))  # average over layers and heads           # tokens * frames
+    attention_matrix = attention_matrix / attention_matrix.norm(dim=-2, keepdim=True)  # This was before the mean before 1.9
+    attention_matrix = -attention_matrix.double().numpy()
+    cost_matrix = attention_matrix
+    plot_raw_cost_matrix(cost_matrix)
+    import pdb; pdb.set_trace()
+    
+    results = []
+    
+    for b in range(batch_size):
+        cost = cost_matrix[b]  # [M, N]
+        
+        # Initialize DTW matrix
+        dtw_matrix = torch.full((M + 1, N + 1), float('inf'), device=cost.device)
+        dtw_matrix[0, 0] = 0.0
+        
+        # Fill DTW matrix
+        for i in range(1, M + 1):
+            for j in range(1, N + 1):
+                dtw_cost = cost[i-1, j-1]
+                dtw_matrix[i, j] = dtw_cost + torch.min(torch.stack([
+                    dtw_matrix[i-1, j],     # insertion
+                    dtw_matrix[i, j-1],     # deletion
+                    dtw_matrix[i-1, j-1]    # match
+                ]))
+        
+        total_cost = dtw_matrix[M, N]
+        
+        if return_path:
+            # Backtrack to find optimal path
+            path = []
+            i, j = M, N
+            
+            while i > 0 and j > 0:
+                path.append((i-1, j-1))  # Convert back to 0-indexed
+                
+                # Find which direction gave minimum cost
+                candidates = [
+                    (dtw_matrix[i-1, j-1], (i-1, j-1)),  # diagonal
+                    (dtw_matrix[i-1, j], (i-1, j)),      # up
+                    (dtw_matrix[i, j-1], (i, j-1))       # left
+                ]
+                _, (i, j) = min(candidates, key=lambda x: x[0])
+            
+            path.reverse()
+            results.append((total_cost, path))
+        else:
+            results.append(total_cost)
+    
+    if len(results) == 1:
+        return results[0]
+    return results
+
+def dtw_alignment_vectorized(attention_matrix):
+    """
+    Vectorized DTW implementation (faster but more memory intensive).
+    
+    Args:
+        attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
+    
+    Returns:
+        dtw_costs: Tensor of DTW costs for each batch item
+    """
+    if attention_matrix.dim() == 2:
+        attention_matrix = attention_matrix.unsqueeze(0)
+    
+    batch_size, M, N = attention_matrix.shape
+    
+    # Convert attention to cost
+    cost_matrix = 1.0 - attention_matrix
+    
+    # Initialize DTW matrix for all batches
+    dtw_matrix = torch.full((batch_size, M + 1, N + 1), float('inf'), device=attention_matrix.device)
+    dtw_matrix[:, 0, 0] = 0.0
+    
+    # Fill DTW matrix
+    for i in range(1, M + 1):
+        for j in range(1, N + 1):
+            dtw_cost = cost_matrix[:, i-1, j-1]
+            candidates = torch.stack([
+                dtw_matrix[:, i-1, j],     # insertion
+                dtw_matrix[:, i, j-1],     # deletion
+                dtw_matrix[:, i-1, j-1]    # match
+            ], dim=1)
+            dtw_matrix[:, i, j] = dtw_cost + torch.min(candidates, dim=1)[0]
+    
+    return dtw_matrix[:, M, N]
+
+# Usage with your attention scores:
+def apply_dtw_to_attention(final_tensor):
+    """
+    Apply DTW to your processed attention tensor.
+    
+    Args:
+        final_tensor: Shape [1, 17, 46] - your averaged attention scores
+    
+    Returns:
+        dtw_cost: DTW alignment cost
+        alignment_path: Optimal alignment path
+    """
+    # Ensure attention scores are normalized (optional)
+    attention_normalized = F.softmax(final_tensor, dim=-1)
+    
+    # Apply DTW
+    dtw_cost, alignment_path = dtw_alignment(attention_normalized, return_path=True)
+    
+    return dtw_cost, alignment_path
+
+def dtw_path_to_timestamps(
+    path: List[Tuple[int, int]], 
+    tokens: List[str], 
+    audio_duration: float,
+    frame_duration: float = None,
+    char_level: bool = True
+) -> Dict[str, List[Dict]]:
+    """
+    Convert DTW alignment path to timestamp format.
+    
+    Args:
+        path: DTW alignment path as list of (decoder_step, encoder_step) tuples
+        tokens: List of tokens/characters corresponding to decoder steps
+        audio_duration: Total audio duration in seconds
+        frame_duration: Duration of each encoder frame in seconds (if None, calculated from audio_duration)
+        char_level: Whether to create character-level timestamps (True) or token-level (False)
+    
+    Returns:
+        Dictionary with timestamp information in NeMo format
+    """
+    if frame_duration is None:
+        # Calculate frame duration from total audio duration and number of encoder steps
+        max_encoder_step = max(encoder_step for _, encoder_step in path)
+        frame_duration = audio_duration / (max_encoder_step + 1)
+    
+    # Group consecutive decoder steps that map to the same or consecutive encoder steps
+    timestamp_segments = []
+    current_segment = {
+        'decoder_start': None,
+        'decoder_end': None,
+        'encoder_start': None,
+        'encoder_end': None,
+        'chars': []
+    }
+    
+    for i, (decoder_step, encoder_step) in enumerate(path):
+        if current_segment['decoder_start'] is None:
+            # Start new segment
+            current_segment['decoder_start'] = decoder_step
+            current_segment['encoder_start'] = encoder_step
+            current_segment['decoder_end'] = decoder_step
+            current_segment['encoder_end'] = encoder_step
+            if decoder_step < len(tokens):
+                current_segment['chars'].append(tokens[decoder_step])
+        else:
+            # Check if we should continue current segment or start new one
+            prev_decoder_step = current_segment['decoder_end']
+            
+            if decoder_step == prev_decoder_step:
+                # Same decoder step, extend encoder range
+                current_segment['encoder_end'] = encoder_step
+            elif decoder_step == prev_decoder_step + 1:
+                # Next decoder step, extend both ranges
+                current_segment['decoder_end'] = decoder_step
+                current_segment['encoder_end'] = encoder_step
+                if decoder_step < len(tokens):
+                    current_segment['chars'].append(tokens[decoder_step])
+            else:
+                # Gap in decoder steps, finish current segment and start new one
+                timestamp_segments.append(current_segment)
+                current_segment = {
+                    'decoder_start': decoder_step,
+                    'decoder_end': decoder_step,
+                    'encoder_start': encoder_step,
+                    'encoder_end': encoder_step,
+                    'chars': [tokens[decoder_step]] if decoder_step < len(tokens) else []
+                }
+    
+    # Add the last segment
+    if current_segment['decoder_start'] is not None:
+        timestamp_segments.append(current_segment)
+    
+    # Convert to timestamp format
+    result_timestamps = []
+    
+    for segment in timestamp_segments:
+        if not segment['chars']:  # Skip empty segments
+            continue
+            
+        # Calculate time boundaries
+        start_time = segment['encoder_start'] * frame_duration
+        end_time = (segment['encoder_end'] + 1) * frame_duration  # +1 because end is inclusive
+        
+        # Calculate character offsets (assuming character-level tokens)
+        start_offset = segment['decoder_start']
+        end_offset = segment['decoder_end'] + 1  # +1 because end is exclusive in offset
+        
+        if char_level:
+            # Create individual character timestamps
+            chars_in_segment = segment['chars']
+            segment_duration = end_time - start_time
+            char_duration = segment_duration / len(chars_in_segment) if len(chars_in_segment) > 0 else 0
+            
+            for i, char in enumerate(chars_in_segment):
+                char_start_time = start_time + (i * char_duration)
+                char_end_time = start_time + ((i + 1) * char_duration)
+                char_start_offset = start_offset + i
+                char_end_offset = start_offset + i + 1
+                
+                result_timestamps.append({
+                    "char": [char],
+                    "start_offset": char_start_offset,
+                    "end_offset": char_end_offset,
+                    "start": round(char_start_time, 3),
+                    "end": round(char_end_time, 3)
+                })
+        else:
+            # Create token-level timestamp
+            result_timestamps.append({
+                "char": segment['chars'],
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+                "start": round(start_time, 3),
+                "end": round(end_time, 3)
+            })
+    
+    return {"char": result_timestamps}
+
+
+def create_timestamps_from_dtw_path(
+    path, 
+    y_sequence,  # Your token IDs 
+    tokenizer,   # Your model's tokenizer
+    frame_duration_ms=80.0
+):
+    """
+    Create timestamps from DTW path and token sequence.
+    
+    Args:
+        path: DTW alignment path like [(0, 0), (0, 1), (0, 2), ...]
+        y_sequence: List of token IDs from decoder
+        tokenizer: Model's tokenizer to convert tokens to text
+        frame_duration_ms: Duration per frame in milliseconds (default: 80ms)
+    
+    Returns:
+        Dictionary with character-level timestamps in the format you requested
+    """
+    import torch
+    
+    frame_duration_s = frame_duration_ms / 1000.0
+    
+    # Group path segments by decoder steps
+    segments = []
+    current_segment = None
+    
+    for decoder_step, encoder_step in path:
+        if current_segment is None or current_segment['decoder_step'] != decoder_step:
+            # Start new segment
+            if current_segment is not None:
+                segments.append(current_segment)
+            current_segment = {
+                'decoder_step': decoder_step,
+                'encoder_start': encoder_step,
+                'encoder_end': encoder_step
+            }
+        else:
+            # Extend current segment
+            current_segment['encoder_end'] = encoder_step
+    
+    if current_segment is not None:
+        segments.append(current_segment)
+    
+    # Create character-level timestamps
+    result_timestamps = []
+    char_offset = 0
+    
+    for segment in segments:
+        decoder_step = segment['decoder_step']
+        
+        # Skip if decoder step is out of range
+        if decoder_step >= len(y_sequence):
+            continue
+            
+        # Get the token text for this decoder step
+        token_id = y_sequence[decoder_step]
+        
+        # Convert token ID to text using tokenizer
+        if hasattr(tokenizer, 'ids_to_text'):
+            token_text = tokenizer.ids_to_text([token_id.item()])
+        elif hasattr(tokenizer, 'decode_ids_to_str'):
+            token_text = tokenizer.decode_ids_to_str([token_id.item()])
+        elif hasattr(tokenizer, 'decode'):
+            token_text = tokenizer.decode([token_id.item()])
+        elif hasattr(tokenizer, 'ids_to_tokens'):
+            token_text = tokenizer.ids_to_tokens([token_id.item()])[0]
+        else:
+            # Fallback - convert to string
+            token_text = str(token_id)
+        
+        # Clean up token text (remove special tokens like <unk>, <pad>, etc.)
+        if token_text.startswith('<') and token_text.endswith('>'):
+            continue  # Skip special tokens
+        
+        # Calculate timing
+        start_time = segment['encoder_start'] * frame_duration_s
+        end_time = segment['encoder_end'] * frame_duration_s
+        
+        # Create character-level timestamps for this token
+        if len(token_text) > 0:
+            
+            result_timestamps.append({
+                "char": token_text,
+                "start_offset": segment['encoder_start'],
+                "end_offset": segment['encoder_end'],
+                "start": round(start_time, 2),
+                "end": round(end_time, 2)
+            })
+            
+    
+    return {"char": result_timestamps}
+
+
+
+# Usage with your data:
+# timestamps = create_timestamps_from_dtw_path(path, y_sequence, model.tokenizer)
+
+# Example usage with your path:
+# def create_timestamps_from_dtw(path, tokens, audio_duration):
+#     """
+#     Simplified wrapper for your specific use case.
+    
+#     Args:
+#         path: Your DTW path like [(0, 0), (0, 1), (0, 2), ...]
+#         tokens: List of tokens/characters from your model
+#         audio_duration: Total audio duration in seconds
+#     """
+#     return dtw_path_to_timestamps(
+#         path=path,
+#         tokens=tokens,
+#         audio_duration=audio_duration,
+#         char_level=True  # Set to False for token-level timestamps
+#     )
+
+# Usage example:
+# Assuming you have:
+# path = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (1, 8), ...]
+# tokens = ["F", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d", ...]  # Your decoded tokens
+# audio_duration = 2.3  # seconds
+# 
+# timestamps = create_timestamps_from_dtw(path, tokens, audio_duration)
+# print(timestamps)
+
+# Example usage:
+# dtw_input = final_tensor.mean(dim=(1, 2))  # Shape: [1, 17, 46]
+# cost, path = apply_dtw_to_attention(dtw_input)
+# print(f"DTW cost: {cost}")
+# print(f"Alignment path length: {len(path)}")
+
+def create_encoded_char_offsets_from_timestamps(timestamps, y_sequence, tokenizer):
+    """
+    Create encoded_char_offsets from timestamps and token sequence.
+    
+    Args:
+        timestamps: Dictionary with 'char' key containing character timestamps
+        y_sequence: List of token IDs
+        tokenizer: Model's tokenizer
+    
+    Returns:
+        List of encoded character offsets with string tokens (not IDs)
+    """
+    char_timestamps = timestamps['char']
+    encoded_char_offsets = []
+    
+    # # Convert token IDs to string tokens
+    # if hasattr(tokenizer, 'ids_to_tokens'):
+    #     string_tokens = tokenizer.text_ids(y_sequence)
+    # else:
+    #     # Fallback - convert IDs to strings
+    #     string_tokens = [str(token_id) for token_id in y_sequence]
+    
+    # Map character timestamps to token strings
+    token_idx = 0
+    import pdb; pdb.set_trace()
+    for i, char_offset in enumerate(char_timestamps):
+        encoded_offset = char_offset.copy()
+        
+        # Use string token instead of token ID
+        encoded_offset['char'] = [tokenizer.ids_to_tokens([y_sequence[token_idx].item()])[0]]
+        # Keep token_id for reference if needed
+        
+        encoded_char_offsets.append(encoded_offset)
+        
+        # Simple mapping: advance token index
+        # You might need to adjust this based on your tokenizer's behavior
+        token_idx += 1
+    
+    return encoded_char_offsets
+
+# Alternative: If you know the exact mapping between characters and tokens
+def create_encoded_char_offsets_with_mapping(timestamps, y_sequence, tokenizer):
+    """
+    Create encoded_char_offsets with proper character-to-token mapping.
+    """
+    char_timestamps = timestamps['char']
+    
+    # Get string tokens from IDs
+    if hasattr(tokenizer, 'ids_to_tokens'):
+        string_tokens = tokenizer.ids_to_tokens(y_sequence)
+    else:
+        string_tokens = [str(token_id) for token_id in y_sequence]
+    
+    # Decode full text to understand character distribution
+    if hasattr(tokenizer, 'ids_to_text'):
+        full_text = tokenizer.ids_to_text(y_sequence)
+    elif hasattr(tokenizer, 'decode_ids_to_str'):
+        full_text = tokenizer.decode_ids_to_str(y_sequence)
+    else:
+        full_text = ''.join(string_tokens)
+    
+    encoded_char_offsets = []
+    token_idx = 0
+    char_in_token = 0
+    
+    for char_offset in char_timestamps:
+        encoded_offset = char_offset.copy()
+        
+        if token_idx < len(string_tokens):
+            # Use the string token, not the ID
+            encoded_offset['char'] = string_tokens[token_idx]
+            encoded_offset['token_id'] = y_sequence[token_idx] if token_idx < len(y_sequence) else None
+            
+            # Move to next token when current token's characters are exhausted
+            current_token = string_tokens[token_idx]
+            char_in_token += 1
+            
+            # For subword tokens, you might need more sophisticated logic here
+            if char_in_token >= len(current_token):
+                token_idx += 1
+                char_in_token = 0
+        else:
+            encoded_offset['char'] = char_offset['char']
+            encoded_offset['token_id'] = None
+        
+        encoded_char_offsets.append(encoded_offset)
+    
+    return encoded_char_offsets
+
+
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+def plot_raw_cost_matrix(attention_matrix, cost_function='neg_log'):
+    """
+    Simple visualization of cost matrix to see alignment patterns.
+    
+    Args:
+        attention_matrix: Tensor [batch_size, decoder_steps, encoder_steps] or [decoder_steps, encoder_steps]
+        cost_function: 'neg_log' or 'invert' 
+    """
+    import matplotlib.pyplot as plt
+    
+    # Handle both 2D and 3D arrays
+    if len(attention_matrix.shape) == 2:
+        # 2D case: [decoder_steps, encoder_steps]
+        plt.figure(figsize=(10, 6))
+        plt.imshow(attention_matrix, cmap='viridis', aspect='auto', origin='lower')
+        plt.colorbar(label='Cost')
+        plt.xlabel('Encoder Steps (Audio Frames)')
+        plt.ylabel('Decoder Steps (Text Tokens)')
+        plt.title('Raw Cost Matrix')
+        plt.savefig('cost_matrix.png')
+        plt.show()
+    else:
+        # 3D case: [batch_size, decoder_steps, encoder_steps]
+        batch_size = attention_matrix.shape[0]
+        
+        for b in range(batch_size):
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_matrix[b], cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Cost')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'Raw Cost Matrix - Batch {b}')
+            plt.savefig(f'cost_matrix_batch_{b}.png')
+            plt.show()
+        

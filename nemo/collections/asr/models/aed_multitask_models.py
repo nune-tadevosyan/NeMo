@@ -16,9 +16,10 @@ import os
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from math import ceil
+from math import ceil, e
 from typing import Any, Dict, List, Optional, Union
 
+from nemo.core.neural_types.elements import AudioSignal, LabelsType
 import numpy as np
 import torch
 from lightning.pytorch import Trainer
@@ -55,13 +56,14 @@ from nemo.collections.common.prompts.formatter import PromptFormatter
 from nemo.core.classes.common import typecheck
 from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
 from nemo.core.neural_types import (
-    AudioSignal,
+    AcousticEncodedRepresentation,
     ChannelType,
-    LabelsType,
+    ElementType,
     LengthsType,
     LogprobsType,
     MaskType,
     NeuralType,
+    SequenceToSequenceAlignmentType,
     SpectrogramType,
 )
 from nemo.utils import logging, model_utils
@@ -690,8 +692,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         return {
             "transf_log_probs": NeuralType(('B', 'T', 'D'), LogprobsType()),
             "encoded_lengths": NeuralType(tuple('B'), LengthsType()),
-            "encoder_states": NeuralType(('B', 'T', 'D'), ChannelType()),
+            "encoder_states": NeuralType(('B', 'T', 'D'), AcousticEncodedRepresentation()),
             "encoder_mask": NeuralType(('B', 'T'), MaskType()),
+           # "cross_attention_scores": NeuralType(('B', 'H', 'T_dec', 'T_enc'), AttentionScoresType()),
         }
 
     @typecheck()
@@ -716,13 +719,16 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 of shape (B, D, T).
             processed_signal_length: Vector of length B, that contains the individual lengths of the
                 processed audio sequences.
-            # TODO: Add support for `transcript` and `transcript_length` in the docstring
+            transcript: Tensor that represents a batch of transcript tokens, of shape [B, T].
+            transcript_length: Vector of length B, that contains the individual lengths of the transcript sequences.
 
         Returns:
-            A tuple of 3 elements -
+            A tuple of 5 elements -
             1) The log probabilities tensor of shape [B, T, D].
             2) The lengths of the acoustic sequence after propagation through the encoder, of shape [B].
-            3) The greedy token predictions of the model of shape [B, T] (via argmax)
+            3) The encoder states tensor of shape [B, T, D].
+            4) The encoder mask tensor of shape [B, T].
+            5) The cross-attention scores list, where each element is of shape [B, H, T_dec, T_enc] for each decoder layer.
         """
         has_input_signal = input_signal is not None and input_signal_length is not None
         has_processed_signal = processed_signal is not None and processed_signal_length is not None
@@ -749,15 +755,18 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             enc_states = self.transf_encoder(encoder_states=enc_states, encoder_mask=enc_mask)
 
         transf_log_probs = None
+        xatt_scores_list = None  # Initialize cross-attention scores
+        import pdb; pdb.set_trace()
         if transcript is not None:
             dec_mask = lens_to_mask(transcript_length, transcript.shape[1]).to(transcript.dtype)
-            dec_states = self.transf_decoder(
+            dec_states, xatt_scores_list = self.transf_decoder(  # Capture both outputs
                 input_ids=transcript, decoder_mask=dec_mask, encoder_embeddings=enc_states, encoder_mask=enc_mask
             )
             transf_log_probs = self.log_softmax(hidden_states=dec_states)
 
+        import pdb; pdb.set_trace()
+        #return transf_log_probs, encoded_len, enc_states, enc_mask, xatt_scores_list  # Return cross-attention scores
         return transf_log_probs, encoded_len, enc_states, enc_mask
-
     # PTL-specific methods
     def training_step(self, batch: PromptedAudioToTextMiniBatch, batch_nb):
         if batch is None:
@@ -771,7 +780,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         tot_frames = torch.as_tensor(batch.audio.numel(), device=num_frames.device, dtype=torch.float)
         tot_tokens = torch.as_tensor(batch.prompted_transcript.numel(), device=num_frames.device, dtype=torch.float)
 
-        transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
+        transf_log_probs, encoded_len, enc_states, enc_mask, xatt_scores_list = self.forward(
             input_signal=batch.audio,
             input_signal_length=batch.audio_lens,
             transcript=input_ids,
@@ -1034,12 +1043,54 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         # Repear decoder_input_ids to match number of chunks
         if trcfg.enable_chunking and num_chunks > decoder_input_ids.shape[0]:
             decoder_input_ids = decoder_input_ids.repeat(num_chunks, 1)
-        hypotheses = self.decoding.decode_predictions_tensor(
+        decoding_result = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
             decoder_input_ids=decoder_input_ids,
             return_hypotheses=trcfg.return_hypotheses,
         )
+        import pdb; pdb.set_trace()
+        
+        # Extract hypotheses and cross attention scores
+        if isinstance(decoding_result, tuple) and len(decoding_result) == 2:
+            hypotheses, xatt_scores = decoding_result
+        else:
+            # Fallback for compatibility
+            hypotheses = decoding_result
+            xatt_scores = None
+        import pdb; pdb.set_trace()
+        final_tensor = torch.stack([
+            torch.stack([xatt_scores[step][layer] for step in range(len(xatt_scores))], dim=0)
+            for layer in range(4, 8)
+        ], dim=0)
+        final_tensor = final_tensor.permute(2, 0, 3, 1,4,5).squeeze(-2)
+        dtw_input = final_tensor.mean(dim=1)[...,0]
+        import pdb; pdb.set_trace()
+        from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
+        cost, path = dtw_alignment(dtw_input)
+        from nemo.collections.asr.parts.utils.aligner_utils import create_timestamps_from_dtw_path
+# Create encoded_char_offsets
+        timestamps = create_timestamps_from_dtw_path(path, hypotheses[0].y_sequence, self.tokenizer)
+        import pdb; pdb.set_trace()
+        from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
+        from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+        
+# Create encoded_char_offsets with STRING tokens, not IDs
+        encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+            timestamps, hypotheses[0].y_sequence, self.tokenizer
+        )
+
+        # Now this should work without the RuntimeError
+        word_offsets = get_words_offsets(
+            char_offsets=timestamps['char'],
+            decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+            encoded_char_offsets=encoded_char_offsets,
+            supported_punctuation={',', '.', '!', '?'},
+        )
+        print(word_offsets)
+        import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
+
         merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
 
         del enc_states, enc_mask, decoder_input_ids
@@ -1069,11 +1120,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             )
             # Inject the id of the cut to hypothese to later be used for separate batches
             setattr(merged_hypotheses, 'id', batch.cuts[0].id.split("-", 1)[0])
-            return [merged_hypotheses]
+            return [merged_hypotheses], xatt_scores
 
         if trcfg.enable_chunking and len(hypotheses) == 1:
             setattr(hypotheses[0], 'id', batch.cuts[0].id.split("-", 1)[0])
-        return hypotheses
+        return hypotheses, xatt_scores
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
         """

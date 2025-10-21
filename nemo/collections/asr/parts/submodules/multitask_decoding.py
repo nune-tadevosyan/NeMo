@@ -243,15 +243,26 @@ class AbstractMultiTaskDecoding(ConfidenceMixin):
         """
         # Compute hypotheses
         with torch.inference_mode():
-            hypotheses_list = self.decoding(
+            decoding_result = self.decoding(
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_input_mask=encoder_input_mask,
                 decoder_input_ids=decoder_input_ids,
                 partial_hypotheses=partial_hypotheses,
-            )  # type: [List[Hypothesis]]
-
-            # extract the hypotheses
-            hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
+            )
+            
+            # extract the hypotheses and cross attention scores
+            if isinstance(decoding_result, dict):
+                # New format: dictionary with predictions and cross_attention_scores
+                hypotheses_list = decoding_result["predictions"][0]
+                xatt_scores = decoding_result.get("cross_attention_scores", None)
+            elif len(decoding_result) == 2:
+                # Backward compatibility: tuple format
+                hypotheses_list, xatt_scores = decoding_result
+                hypotheses_list = hypotheses_list[0] if isinstance(hypotheses_list, (list, tuple)) and len(hypotheses_list) > 0 else hypotheses_list
+            else:
+                # Fallback for compatibility with decoders that don't return cross attention scores
+                hypotheses_list = decoding_result[0]  # type: List[Hypothesis]
+                xatt_scores = None
 
         prediction_list = hypotheses_list
 
@@ -267,10 +278,10 @@ class AbstractMultiTaskDecoding(ConfidenceMixin):
                 all_hypotheses.append(decoded_hyps)
 
             if return_hypotheses:
-                return all_hypotheses
+                return all_hypotheses, xatt_scores
 
             all_hyp = [[Hypothesis(h.score, h.y_sequence, h.text) for h in hh] for hh in all_hypotheses]
-            return all_hyp
+            return all_hyp, xatt_scores
 
         else:
             hypotheses = self.decode_hypothesis(prediction_list)
@@ -281,9 +292,9 @@ class AbstractMultiTaskDecoding(ConfidenceMixin):
                     self.preserve_word_confidence or self.preserve_token_confidence
                 ):
                     hypotheses = self.compute_confidence(hypotheses)
-                return hypotheses
+                return hypotheses, xatt_scores
 
-            return [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses]
+            return [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses], xatt_scores
 
     def decode_hypothesis(self, hypotheses_list: List[Hypothesis]) -> List[Union[Hypothesis, NBestHypotheses]]:
         """

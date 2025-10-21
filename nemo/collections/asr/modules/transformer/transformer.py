@@ -236,7 +236,7 @@ class TransformerDecoderNM(DecoderModule, Exportable):
         )
         if self.return_mems:
             decoder_hidden_states = torch.transpose(decoder_hidden_states, 0, 1)
-        return decoder_hidden_states
+        return decoder_hidden_states, xatt_scores_list  # Return both hidden states and cross-attention scores
 
     @property
     def hidden_size(self):

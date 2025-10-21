@@ -125,6 +125,7 @@ class TransformerDecoderBlock(nn.Module, AttentionAdapterModuleMixin):
         Post-LayerNorm block
         Order of operations: Self-Attn -> Residual -> LN -> Cross-Attn -> Residual -> LN -> FFN -> Residual -> LN
         """
+        # self attention only on decoder query and decoder keys
         self_attn_output, _ = self.first_sub_layer(decoder_query, decoder_keys, decoder_keys, decoder_mask)
         self_attn_output += decoder_query
 
@@ -140,7 +141,7 @@ class TransformerDecoderBlock(nn.Module, AttentionAdapterModuleMixin):
             self_attn_output = pack_ip['x']
 
         self_attn_output = self.layer_norm_1(self_attn_output)
-
+        # cross attention only on self attention output and encoder states
         enc_dec_attn_output, extra_output = self.second_sub_layer(
             self_attn_output, encoder_states, encoder_states, encoder_mask
         )

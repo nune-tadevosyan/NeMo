@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager
+from operator import imod
 from typing import Optional
 
 import torch
@@ -284,12 +285,12 @@ class GreedySequenceGenerator(ConfidenceMethodMixin):
             if not return_beam_scores:
                 return results
             else:
-                prefixes, scores, tgt = results
+                prefixes, scores, tgt, xatt_scores = results
                 prefixes = prefixes.view(-1, self.beam_size, tgt.size(1)).split(1, dim=0)
                 scores = scores.view(-1, self.beam_size).split(1, dim=0)
                 prefixes = [x.squeeze(0) for x in prefixes]  # each item is [beam, seq_len]
                 scores = [x.squeeze(0) for x in scores]  # each item is [beam,]
-                return prefixes, scores, tgt
+                return prefixes, scores, tgt, xatt_scores
 
     def freeze(self) -> None:
         """Freeze weights of embedding, decoder, and classification layers to prevent memory leak."""
@@ -411,11 +412,18 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         self, decoder_input_ids=None, encoder_hidden_states=None, encoder_input_mask=None, return_beam_scores=False
     ):
         tgt, batch_size, max_generation_length = self._prepare_for_search(decoder_input_ids, encoder_hidden_states)
-
+        import pdb; pdb.set_trace()
         # generate initial buffer of beam_size prefixes-hypotheses
-        log_probs, decoder_mems_list, _ = self._one_step_forward(
+        print("418")
+        
+        log_probs, decoder_mems_list, xatt_scores_initial = self._one_step_forward(
             tgt, encoder_hidden_states, encoder_input_mask, None, 0
         )
+        
+        # Store cross attention scores for each step
+        all_xatt_scores = []
+        # if xatt_scores_initial is not None:
+        #     all_xatt_scores.append(xatt_scores_initial)
         scores, prefixes = torch.topk(log_probs.permute(0, 2, 1), self.beam_size, dim=1)
         scores, prefixes = scores.view(-1, 1), prefixes.view(-1, 1)
 
@@ -434,7 +442,7 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         else:
             hidden_size = decoder_mems_list[0].size(2)
 
-        # pad_profile tracks finished hypotheses to generate only <pad> tokens
+        #    tracks finished hypotheses to generate only <pad> tokens
         # if <eos> or <pad> has been generated
         pad_profile = torch.zeros_like(scores).long()
 
@@ -444,14 +452,21 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
 
         tgt_len = tgt.size(-1)
         for i in range(tgt_len, max_generation_length + tgt_len):
-
+            print(f"i {i}")
             # mask all finished hypotheses to exclude them from beam
             pad_mask = pad_profile.repeat(1, self.beam_size)
 
             # generate and score candidates for prefixes continuation
-            log_probs, decoder_mems_list, _ = self._one_step_forward(
+            log_probs, decoder_mems_list, xatt_scores_step = self._one_step_forward(
                 prefixes[:, -1:], encoder_hidden_states, encoder_input_mask, decoder_mems_list, i
             )
+            
+            # Store cross attention scores for this step
+    
+            if xatt_scores_step is not None:
+                
+                print(xatt_scores_step[3].shape)
+                all_xatt_scores.append(xatt_scores_step)
             scores_i, prefixes_i = torch.topk(log_probs[:, -1, :], self.beam_size, dim=-1)
 
             # for all prefixes ending with <eos> or <pad> replace generated
@@ -507,9 +522,9 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         tgt = prefixes.view(batch_size, self.beam_size, -1).gather(1, best_guesses).squeeze(1)
 
         if return_beam_scores:
-            return prefixes, scores * len_penalties, tgt
+            return prefixes, scores * len_penalties, tgt, all_xatt_scores
         else:
-            return tgt
+            return tgt, all_xatt_scores
 
 
 class BeamSearchSequenceGeneratorWithFusionModels(BeamSearchSequenceGenerator):
@@ -549,9 +564,14 @@ class BeamSearchSequenceGeneratorWithFusionModels(BeamSearchSequenceGenerator):
         batch_fusion_states_candidates_list = []
 
         # generate initial buffer of beam_size prefixes-hypotheses
-        log_probs, decoder_mems_list, _ = self._one_step_forward(
+        log_probs, decoder_mems_list, xatt_scores_initial = self._one_step_forward(
             tgt, encoder_hidden_states, encoder_input_mask, None, 0
         )
+        
+        # Store cross attention scores for each step
+        all_xatt_scores = []
+        if xatt_scores_initial is not None:
+            all_xatt_scores.append(xatt_scores_initial)
         # get fusion models scores
         for fusion_model_idx, fusion_model in enumerate(self.fusion_models):
             fusion_scores, batch_fusion_states_candidates = fusion_model.advance(
@@ -600,9 +620,13 @@ class BeamSearchSequenceGeneratorWithFusionModels(BeamSearchSequenceGenerator):
             pad_mask = pad_profile.repeat(1, self.beam_size)
 
             # generate and score candidates for prefixes continuation
-            log_probs, decoder_mems_list, _ = self._one_step_forward(
+            log_probs, decoder_mems_list, xatt_scores_step = self._one_step_forward(
                 prefixes[:, -1:], encoder_hidden_states, encoder_input_mask, decoder_mems_list, i
             )
+            
+            # Store cross attention scores for this step
+            if xatt_scores_step is not None:
+                all_xatt_scores.append(xatt_scores_step)
             for fusion_model_idx, fusion_model in enumerate(self.fusion_models):
                 fusion_scores, batch_fusion_states_candidates = fusion_model.advance(
                     states=batch_fusion_states_list[fusion_model_idx], eos_id=self.eos
@@ -676,9 +700,9 @@ class BeamSearchSequenceGeneratorWithFusionModels(BeamSearchSequenceGenerator):
         tgt = prefixes.view(batch_size, self.beam_size, -1).gather(1, best_guesses).squeeze(1)
 
         if return_beam_scores:
-            return prefixes, scores * len_penalties, tgt
+            return prefixes, scores * len_penalties, tgt, all_xatt_scores
         else:
-            return tgt
+            return tgt, all_xatt_scores
 
 
 class EnsembleBeamSearchSequenceGenerator:
@@ -1127,7 +1151,7 @@ class BeamSearchSequenceGeneratorWithLanguageModel(GreedySequenceGenerator):
         prefixes_len = torch.zeros_like(scores).fill_(prefixes.size(1) + 1)
 
         for i in range(max_generation_length):
-
+            print(f"i {i}")
             # mask all finished hypotheses to exclude them from beam
             pad_mask = pad_profile.repeat(1, self.beam_size)
 

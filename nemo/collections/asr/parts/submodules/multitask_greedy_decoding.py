@@ -188,6 +188,7 @@ class TransformerAEDGreedyInfer(AEDGreedyInfer, Typing):
         Returns:
             packed list containing batch number of sentences (Hypotheses).
         """
+        import pdb; pdb.set_trace()
         with torch.inference_mode():
             self.transformer_decoder.eval()
             self.log_softmax_module.eval()
