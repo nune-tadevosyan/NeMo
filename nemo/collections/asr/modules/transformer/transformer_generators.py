@@ -408,7 +408,6 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         """Returns length penalty according to https://arxiv.org/pdf/1609.08144.pdf"""
         return ((5 + lengths) / 6).pow(alpha)
 
-
     def _forward(
         self, decoder_input_ids=None, encoder_hidden_states=None, encoder_input_mask=None, return_beam_scores=False
     ):
@@ -420,8 +419,15 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         log_probs, decoder_mems_list, xatt_scores_initial = self._one_step_forward(
             tgt, encoder_hidden_states, encoder_input_mask, None, 0
         )
+        import pdb; pdb.set_trace()
         all_xatt_scores = []
-        all_xatt_scores.append([xatt_scores_initial[i][:,:,-1:,:] for i in range(len(xatt_scores_initial))])
+        for s in range(xatt_scores_initial[0].shape[2]):
+            step_xatt_scores = []
+            for l in range(len(xatt_scores_initial)):
+                step_xatt_scores.append(xatt_scores_initial[l][:, :, s, :].unsqueeze(2))
+            all_xatt_scores.append(step_xatt_scores)
+
+        # all_xatt_scores.append([xatt_scores_initial[i] for i in range(len(xatt_scores_initial))])
         # Store cross attention scores for each step
         
         # if xatt_scores_initial is not None:
@@ -524,9 +530,9 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         tgt = prefixes.view(batch_size, self.beam_size, -1).gather(1, best_guesses).squeeze(1)
 
         if return_beam_scores:
-            return prefixes, scores * len_penalties, tgt, all_xatt_scores
+            return prefixes, scores * len_penalties, tgt, all_xatt_scores[9:]
         else:
-            return tgt, all_xatt_scores
+            return tgt, all_xatt_scores[9:]
 
 
 class BeamSearchSequenceGeneratorWithFusionModels(BeamSearchSequenceGenerator):

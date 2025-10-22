@@ -1224,28 +1224,28 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         cost, path = dtw_alignment(dtw_input)
         from nemo.collections.asr.parts.utils.aligner_utils import create_timestamps_from_dtw_path
 # Create encoded_char_offsets
-        timestamps = create_timestamps_from_dtw_path(path, hypotheses[0].y_sequence, self.tokenizer)
-        from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
-        from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+#         timestamps = create_timestamps_from_dtw_path(path, hypotheses[0].y_sequence, self.tokenizer)
+#         from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
+#         from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
         
-# Create encoded_char_offsets with STRING tokens, not IDs
-        encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
-            timestamps, hypotheses[0].y_sequence, self.tokenizer
-        )
+# # Create encoded_char_offsets with STRING tokens, not IDs
+#         encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+#             timestamps, hypotheses[0].y_sequence, self.tokenizer
+#         )
 
-        # Now this should work without the RuntimeError
-        word_offsets = get_words_offsets(
-            char_offsets=timestamps['char'],
-            decode_tokens_to_str=self.decoding.decode_tokens_to_str,
-            encoded_char_offsets=encoded_char_offsets,
-            supported_punctuation={',', '.', '!', '?'},
-        )
+#         # Now this should work without the RuntimeError
+#         word_offsets = get_words_offsets(
+#             char_offsets=timestamps['char'],
+#             decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+#             encoded_char_offsets=encoded_char_offsets,
+#             supported_punctuation={',', '.', '!', '?'},
+#         )
         import pdb; pdb.set_trace()
         tokens, token_ids = self.retokenize_with_separate_space(hypotheses[0].text)
         new_decoding_result = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
-            decoder_input_ids=(torch.cat([decoder_input_ids[0], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0), None),
+            decoder_input_ids=torch.cat([decoder_input_ids[0], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0),
             return_hypotheses=trcfg.return_hypotheses,
         )
         new_hypotheses, new_xatt_scores = new_decoding_result
@@ -1253,8 +1253,53 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             torch.stack([new_xatt_scores[step][layer][:,:,] for step in range(len(new_xatt_scores))], dim=0)
             for layer in range(4, 8)
         ], dim=0) 
+        new_final_tensor = new_final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
+        valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
 
-        print(word_offsets)
+        # Option 1: Process each batch item separately (returns list of tensors)
+        new_filtered_tensors = []
+        for batch_idx in range(new_final_tensor.shape[0]):
+            valid_len = valid_lengths[batch_idx].item()
+            # Slice     each batch item to its valid length
+            new_filtered_item = new_final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
+            new_filtered_tensors.append(new_filtered_item)
+        max_valid_len = valid_lengths.max().item()
+        new_filtered_tensor = new_final_tensor[..., :max_valid_len]  
+
+
+        import pdb; pdb.set_trace()
+        new_attention_matrix = new_filtered_tensor.reshape(1, -1, new_filtered_tensor.shape[-2], new_filtered_tensor.shape[-1])
+        new_attention_matrix = median_filter(new_attention_matrix.double().cpu().numpy(), (1, 1, 1, 1))
+        new_attention_matrix = torch.tensor(new_attention_matrix * 1).softmax(dim=-1)
+        new_attention_matrix = new_attention_matrix.mean(axis=(1))
+        new_attention_matrix = new_attention_matrix/new_attention_matrix.norm(dim=-2, keepdim=True)
+        new_dtw_input = torch.tensor(new_attention_matrix, device=new_filtered_tensor.device).double()
+
+        from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
+        new_cost, new_path = dtw_alignment(new_dtw_input)
+        from nemo.collections.asr.parts.utils.aligner_utils import create_timestamps_from_dtw_path
+# Create encoded_char_offsets
+        new_timestamps = create_timestamps_from_dtw_path(new_path, torch.tensor(token_ids), self.tokenizer)
+        from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
+        from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+        
+# Create encoded_char_offsets with STRING tokens, not IDs
+        import pdb; pdb.set_trace()
+        new_encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+            new_timestamps,  torch.tensor(token_ids), self.tokenizer
+        )
+
+        # Now this should work without the RuntimeError
+        new_word_offsets = get_words_offsets(
+            char_offsets=new_encoded_char_offsets,
+            decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+            encoded_char_offsets=new_timestamps['char'],
+            supported_punctuation={',', '.', '!', '?'},
+        )
+
+
+
+        print(new_word_offsets)
         import pdb; pdb.set_trace()
         import pdb; pdb.set_trace()
 
@@ -1304,6 +1349,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         1. A separate space token ('_' or '▁')
         2. The remaining token without the prefix
         
+        Also adds '_' token at the start and end of the sequence.
+        
         Args:
             text: Input text string to retokenize
             
@@ -1315,8 +1362,10 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         # Get BPE tokens from the tokenizer
         bpe_tokens = self.tokenizer.text_to_tokens(text)
         
-        # Process tokens to separate space markers
+        # Add '_' token at the start
         processed_tokens = []
+        
+        # Process tokens to separate space markers
         for token in bpe_tokens:
             # Check if token starts with underscore (common BPE space marker)
             # Could be '_' or '▁' (U+2581) depending on tokenizer
@@ -1327,13 +1376,17 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 if rest_of_token:
                     # Split into space token and remaining token
                     processed_tokens.append(space_char)
-                    processed_tokens.append(rest_of_token)
+                    processed_tokens.append(token)
                 else:
                     # Token is just the space character
                     processed_tokens.append(space_char)
             else:
                 # Token doesn't start with space marker, keep as is
                 processed_tokens.append(token)
+        
+        # Add '_' token at the end
+        import pdb; pdb.set_trace()
+        processed_tokens.append('▁')
         
         # Get token IDs for the processed tokens
         token_ids = self.tokenizer.tokens_to_ids(processed_tokens)

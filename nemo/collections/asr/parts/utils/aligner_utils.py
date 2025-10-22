@@ -1364,23 +1364,22 @@ def create_timestamps_from_dtw_path(
             
         # Get the token text for this decoder step
         token_id = y_sequence[decoder_step]
-        
         # Convert token ID to text using tokenizer
-        if hasattr(tokenizer, 'ids_to_text'):
-            token_text = tokenizer.ids_to_text([token_id.item()])
+        if hasattr(tokenizer, 'ids_to_tokens'):
+            token_text = tokenizer.ids_to_tokens([token_id.item()])
         elif hasattr(tokenizer, 'decode_ids_to_str'):
             token_text = tokenizer.decode_ids_to_str([token_id.item()])
         elif hasattr(tokenizer, 'decode'):
             token_text = tokenizer.decode([token_id.item()])
-        elif hasattr(tokenizer, 'ids_to_tokens'):
-            token_text = tokenizer.ids_to_tokens([token_id.item()])[0]
+        elif hasattr(tokenizer, 'ids_to_text'):
+            token_text = tokenizer.ids_to_text([token_id.item()])[0]
         else:
             # Fallback - convert to string
             token_text = str(token_id)
         
         # Clean up token text (remove special tokens like <unk>, <pad>, etc.)
-        if token_text.startswith('<') and token_text.endswith('>'):
-            continue  # Skip special tokens
+        # if token_text.startswith('<') and token_text.endswith('>'):
+        #     continue  # Skip special tokens
         
         # Calculate timing
         start_time = segment['encoder_start'] * frame_duration_s
@@ -1466,14 +1465,15 @@ def create_encoded_char_offsets_from_timestamps(timestamps, y_sequence, tokenize
         encoded_offset = char_offset.copy()
         
         # Use string token instead of token ID
-        encoded_offset['char'] = [tokenizer.ids_to_tokens([y_sequence[token_idx].item()])[0]]
+        encoded_offset['char'] = [tokenizer.tokens_to_text(char_offset['char'])]
         # Keep token_id for reference if needed
         
         encoded_char_offsets.append(encoded_offset)
         
-        # Simple mapping: advance token index
-        # You might need to adjust this based on your tokenizer's behavior
-        token_idx += 1
+
+        # # Simple mapping: advance token index
+        # # You might need to adjust this based on your tokenizer's behavior
+        # token_idx += 1
     
     return encoded_char_offsets
 
