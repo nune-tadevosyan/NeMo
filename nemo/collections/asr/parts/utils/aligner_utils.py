@@ -1067,7 +1067,7 @@ import torch.nn.functional as F
 
 def dtw_alignment(attention_matrix, return_path=True):
     """
-    Compute DTW alignment from attention matrix.
+    Compute DTW alignment from attention matrix to cost matrix.
     
     Args:
         attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
@@ -1078,22 +1078,12 @@ def dtw_alignment(attention_matrix, return_path=True):
         cost: DTW cost
         path: Optimal alignment path (if return_path=True)
     """
-    if attention_matrix.dim() == 2:
-        attention_matrix = attention_matrix.unsqueeze(0)
+    if len(attention_matrix.shape) == 2:
+        attention_matrix = attention_matrix.reshape(1, attention_matrix.shape[0], attention_matrix.shape[1])
     
     batch_size, M, N = attention_matrix.shape  # M=decoder_steps, N=encoder_steps
-    
-    # Convert attention scores to cost (higher attention = lower cost)
-    # You can experiment with different cost functions
-
-    #cost_matrix = -torch.log(attention_matrix + 1e-8)
-    from scipy.ndimage import median_filter
-    attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 9))
-    attention_matrix = torch.tensor(attention_matrix * 1).softmax(dim=-1)
-    attention_matrix = attention_matrix.mean(axis=(0))  # average over layers and heads           # tokens * frames
-    attention_matrix = attention_matrix / attention_matrix.norm(dim=-2, keepdim=True)  # This was before the mean before 1.9
-    attention_matrix = -attention_matrix.double().numpy()
-    cost_matrix = attention_matrix
+    print("attention_matrix.shape: ", attention_matrix.shape)
+    cost_matrix = -attention_matrix
     plot_raw_cost_matrix(cost_matrix)
     import pdb; pdb.set_trace()
     
@@ -1541,7 +1531,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 
-def plot_raw_cost_matrix(attention_matrix, cost_function='neg_log'):
+def plot_raw_cost_matrix(attention_matrix):
     """
     Simple visualization of cost matrix to see alignment patterns.
     
@@ -1550,6 +1540,8 @@ def plot_raw_cost_matrix(attention_matrix, cost_function='neg_log'):
         cost_function: 'neg_log' or 'invert' 
     """
     import matplotlib.pyplot as plt
+    if isinstance(attention_matrix, torch.Tensor):
+        attention_matrix = attention_matrix.cpu().float().numpy()
     
     # Handle both 2D and 3D arrays
     if len(attention_matrix.shape) == 2:

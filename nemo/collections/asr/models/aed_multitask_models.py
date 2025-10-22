@@ -1063,8 +1063,19 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             torch.stack([xatt_scores[step][layer] for step in range(len(xatt_scores))], dim=0)
             for layer in range(4, 8)
         ], dim=0)
-        final_tensor = final_tensor.permute(2, 0, 3, 1,4,5).squeeze(-2)
-        dtw_input = final_tensor.mean(dim=1)[...,0]
+        final_tensor = final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2)
+        # final_tensor = torch.log(final_tensor)
+        import pdb; pdb.set_trace()
+        # dtw_input = final_tensor.mean(dim=1)[...,0]
+        
+        from scipy.ndimage import median_filter
+        attention_matrix = final_tensor.reshape(1, -1, final_tensor.shape[-2], final_tensor.shape[-1])
+        attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 1, 9))
+        attention_matrix = torch.tensor(attention_matrix * 1).softmax(dim=-1)
+        attention_matrix = attention_matrix.mean(axis=(1))
+        attention_matrix = attention_matrix/attention_matrix.norm(dim=-2, keepdim=True)
+        dtw_input = torch.tensor(attention_matrix, device=final_tensor.device).double()
+        
         import pdb; pdb.set_trace()
         from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
         cost, path = dtw_alignment(dtw_input)
