@@ -408,6 +408,7 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         """Returns length penalty according to https://arxiv.org/pdf/1609.08144.pdf"""
         return ((5 + lengths) / 6).pow(alpha)
 
+
     def _forward(
         self, decoder_input_ids=None, encoder_hidden_states=None, encoder_input_mask=None, return_beam_scores=False
     ):
@@ -419,9 +420,10 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         log_probs, decoder_mems_list, xatt_scores_initial = self._one_step_forward(
             tgt, encoder_hidden_states, encoder_input_mask, None, 0
         )
-        
-        # Store cross attention scores for each step
         all_xatt_scores = []
+        all_xatt_scores.append([xatt_scores_initial[i][:,:,-1:,:] for i in range(len(xatt_scores_initial))])
+        # Store cross attention scores for each step
+        
         # if xatt_scores_initial is not None:
         #     all_xatt_scores.append(xatt_scores_initial)
         scores, prefixes = torch.topk(log_probs.permute(0, 2, 1), self.beam_size, dim=1)

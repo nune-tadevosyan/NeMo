@@ -1084,6 +1084,7 @@ def dtw_alignment(attention_matrix, return_path=True):
     batch_size, M, N = attention_matrix.shape  # M=decoder_steps, N=encoder_steps
     print("attention_matrix.shape: ", attention_matrix.shape)
     cost_matrix = -attention_matrix
+    import pdb; pdb.set_trace()
     plot_raw_cost_matrix(cost_matrix)
     import pdb; pdb.set_trace()
     
