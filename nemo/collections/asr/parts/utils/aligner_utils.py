@@ -1085,7 +1085,7 @@ def dtw_alignment(attention_matrix, return_path=True):
     print("attention_matrix.shape: ", attention_matrix.shape)
     cost_matrix = -attention_matrix
     import pdb; pdb.set_trace()
-    plot_raw_cost_matrix(cost_matrix)
+    # plot_raw_cost_matrix(cost_matrix)
     import pdb; pdb.set_trace()
     
     results = []

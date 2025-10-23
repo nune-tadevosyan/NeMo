@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from math import ceil, e
 from typing import Any, Dict, List, Optional, Union
 
-from nemo.core.neural_types.elements import AudioSignal, LabelsType
 import numpy as np
 import torch
 from lightning.pytorch import Trainer
@@ -66,6 +65,7 @@ from nemo.core.neural_types import (
     SequenceToSequenceAlignmentType,
     SpectrogramType,
 )
+from nemo.core.neural_types.elements import AudioSignal, LabelsType
 from nemo.utils import logging, model_utils
 from nemo.utils.app_state import AppState
 
@@ -1028,6 +1028,135 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         # Clip to ensure valid range if needed
         attention_after_sharpen = np.clip(attention_after_sharpen, 0, None)
         return attention_after_sharpen
+    
+    def _visualize_attention_steps(
+        self,
+        attention_matrix: torch.Tensor,
+        base_dir: str = './attention_visualizations',
+        batch_idx: int = 0
+    ):
+        """
+        Visualize attention matrices step-by-step through transformations.
+        Saves layer-wise and head-wise plots at each step.
+        
+        Args:
+            attention_matrix: Input tensor [layers, heads, decoder_steps, encoder_steps]
+            base_dir: Base directory for saving visualizations
+            batch_idx: Batch index for labeling
+        """
+        import os
+
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import median_filter
+        
+        L, H, T, F = attention_matrix.shape
+        
+        # Step 1: Raw attention (after masking)
+        step_dir = os.path.join(base_dir, '1_raw_attention')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_matrix[layer_idx, head_idx].cpu().float().numpy(), 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'Raw - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 2: After median filter
+        attention_filtered = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 1, 1))
+        step_dir = os.path.join(base_dir, '2_after_median_filter')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_filtered[layer_idx, head_idx], 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'After Filter - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 3: After softmax
+        attention_softmax = torch.tensor(attention_filtered).softmax(dim=-1)
+        step_dir = os.path.join(base_dir, '3_after_softmax')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_softmax[layer_idx, head_idx].cpu().float().numpy(), 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'After Softmax - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 4: After averaging heads (per-layer only)
+        attention_avg_heads = attention_softmax.mean(dim=1)  # [L, T, F]
+        step_dir = os.path.join(base_dir, '4_after_avg_heads')
+        for layer_idx in range(L):
+            os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_avg_heads[layer_idx].cpu().float().numpy(), 
+                      cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Attention Value')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'After Avg Heads - Batch {batch_idx} - Layer {layer_idx}')
+            plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'aggregated.png'), 
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        # Step 5: After normalization (per-layer)
+        attention_normalized = attention_avg_heads / (attention_avg_heads.norm(dim=-2, keepdim=True) + 1e-8)
+        step_dir = os.path.join(base_dir, '5_after_normalization')
+        for layer_idx in range(L):
+            os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_normalized[layer_idx].cpu().float().numpy(), 
+                      cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Attention Value')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'After Normalization - Batch {batch_idx} - Layer {layer_idx}')
+            plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'normalized.png'), 
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        print(f"Visualizations saved to {base_dir}/ - {L} layers, {H} heads per layer")
+    
+    def _process_attention_matrix(self,
+        attention_matrix:torch.Tensor,
+        kernel_size: tuple[int, int, int] = (1, 1, 1),
+        qk_scale_factor: float = 1.0,
+        ) -> torch.Tensor:
+        from scipy.ndimage import median_filter
+        
+        L, H, T, F = attention_matrix.shape
+        # flattening with respect to layers and heads
+        attention_matrix = attention_matrix.reshape(L*H, T, F)
+        # applying median filter
+        attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), kernel_size)
+        # applying softmax to the coloumns
+        attention_matrix = torch.tensor(attention_matrix * qk_scale_factor).softmax(dim=-1)
+        # averaging across layers and heads
+        attention_matrix = attention_matrix.mean(axis=(0))
+        # normalizing the attention matrix
+        attention_matrix = attention_matrix/attention_matrix.norm(dim=-2, keepdim=True)
+        
+        return attention_matrix
 
     def _transcribe_output_processing(self, outputs, trcfg: MultiTaskTranscriptionConfig) -> GenericTranscriptionType:
         """
@@ -1058,22 +1187,16 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         # Repear decoder_input_ids to match number of chunks
         if trcfg.enable_chunking and num_chunks > decoder_input_ids.shape[0]:
             decoder_input_ids = decoder_input_ids.repeat(num_chunks, 1)
+            
+        # ------------------------------------------------------------
+        # Option 1: without retokenization
         decoding_result = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
             decoder_input_ids=decoder_input_ids,
             return_hypotheses=trcfg.return_hypotheses,
         )
-        import pdb; pdb.set_trace()
-        
-        # Extract hypotheses and cross attention scores
-        if isinstance(decoding_result, tuple) and len(decoding_result) == 2:
-            hypotheses, xatt_scores = decoding_result
-        else:
-            # Fallback for compatibility
-            hypotheses = decoding_result
-            xatt_scores = None
-        import pdb; pdb.set_trace()
+        hypotheses, xatt_scores = decoding_result
         
         final_tensor = torch.stack([
             torch.stack([xatt_scores[step][layer][:,:,] for step in range(len(xatt_scores))], dim=0)
@@ -1081,232 +1204,91 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         ], dim=0) # Layer x Steps x 1 x  H X 1 x frames 
         final_tensor = final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
         valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
-
-        # Option 1: Process each batch item separately (returns list of tensors)
+    
         filtered_tensors = []
         for batch_idx in range(final_tensor.shape[0]):
+            # step 1: apply mask from encoder to remove invalid elements
+            # mask comes from preprocessor
             valid_len = valid_lengths[batch_idx].item()
-            # Slice each batch item to its valid length
-            filtered_item = final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
-            filtered_tensors.append(filtered_item)
+            attention_matrix = final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
 
-        # Now filtered_tensors is a list where each item can have different encoder lengths
-        print(f"Batch sizes: {[t.shape[-1] for t in filtered_tensors]}")
-        print(f"Batch sizes: {[t.shape[-1] for t in filtered_tensors]}")
+            # Optional: Visualize attention step-by-step (uncomment to enable)
+            self._visualize_attention_steps(attention_matrix, base_dir='./attention_visualizations', batch_idx=batch_idx)
+            
+            attention_matrix = self._process_attention_matrix(attention_matrix)
+            
+            # DTW takes as an input tensor with batch dimension
+            dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
 
-# Option 2: If you need a single tensor, find max valid length and truncate
-        max_valid_len = valid_lengths.max().item()
-        filtered_tensor = final_tensor[..., :max_valid_len]  
-        # Option 2: If you need a single tensor, find max valid length and truncate
-        # final_tensor = torch.log(final_tensor)
-        import pdb; pdb.set_trace()
-        # dtw_input = final_tensor.mean(dim=1)[...,0]
+            from nemo.collections.asr.parts.utils.aligner_utils import (
+                create_encoded_char_offsets_from_timestamps,
+                create_timestamps_from_dtw_path,
+                dtw_alignment,
+            )
+            from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+            cost, path = dtw_alignment(dtw_input)
+            timestamps = create_timestamps_from_dtw_path(path, hypotheses[batch_idx].y_sequence, self.tokenizer)
+            encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+                timestamps, hypotheses[batch_idx].y_sequence, self.tokenizer
+            )
+            word_offsets = get_words_offsets(
+                char_offsets=encoded_char_offsets,
+                decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+                encoded_char_offsets=timestamps['char'],
+                supported_punctuation={',', '.', '!', '?'},
+            )
+            
+            print(encoded_char_offsets)
+            print(word_offsets)
         
-        from scipy.ndimage import median_filter
-        import os
-        import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend
-        import matplotlib.pyplot as plt
-        from nemo.collections.asr.parts.utils.aligner_utils import plot_raw_cost_matrix
+        # ------------------------------------------------------------
+        # Option 2: with retokenization
+        for batch_idx in range(final_tensor.shape[0]):
+            tokens, token_ids = self.retokenize_with_separate_space(hypotheses[batch_idx].text)
+            new_decoder_input_ids = torch.cat([decoder_input_ids[batch_idx], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0)
+            new_decoding_result = self.decoding.decode_predictions_tensor(
+                encoder_hidden_states=enc_states,
+                encoder_input_mask=enc_mask,
+                decoder_input_ids=torch.cat([decoder_input_ids[0], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0),
+                return_hypotheses=trcfg.return_hypotheses,
+            )
+            new_hypotheses, new_xatt_scores = new_decoding_result
+            new_final_tensor = torch.stack([
+                torch.stack([new_xatt_scores[step][layer][:,:,] for step in range(len(new_xatt_scores))], dim=0)
+                for layer in range(0, 8)
+            ], dim=0)
+            new_final_tensor = new_final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
+            valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
 
-        import pdb; pdb.set_trace()
-
-        # Create main directory for visualizations
-        base_dir = 'attention_visualizations'
-        os.makedirs(base_dir, exist_ok=True)
-
-        # Assuming final_tensor shape is [batch, layers, heads, decoder_steps, encoder_steps]
-        # Layer dimension = 1, Head dimension = 2
-
-        # Get the last layer for all heads
-        last_layer_idx = 0
-        batch_idx = 0  # Usually processing first batch
-
-        # Step 1: Raw attention (before any filter) - last layer only
-        step_dir = os.path.join(base_dir, '1_raw_attention')
-        os.makedirs(step_dir, exist_ok=True)
-        import pdb; pdb.set_trace()
-        raw_attention = filtered_tensor[batch_idx, last_layer_idx]  # Shape: [heads, decoder_steps, encoder_steps]
-        num_heads = raw_attention.shape[0]
-        import pdb; pdb.set_trace()
-        for head_idx in range(num_heads):
-            plt.figure(figsize=(10, 6))
-            head_data = raw_attention[head_idx].cpu().float().numpy()
-            plt.imshow(head_data, cmap='viridis', aspect='auto', origin='lower')
-            plt.colorbar(label='Attention Value')
-            plt.xlabel('Encoder Steps (Audio Frames)')
-            plt.ylabel('Decoder Steps (Text Tokens)')
-            plt.title(f'Raw Attention - Last Layer - Head {head_idx}')
-            plt.savefig(os.path.join(step_dir, f'head_{head_idx}.png'), dpi=150, bbox_inches='tight')
-            plt.close()
-
-
-        # Step 2: After median filter - last layer only
-        step_dir = os.path.join(base_dir, '2_after_median_filter')
-        os.makedirs(step_dir, exist_ok=True)
-
-        from scipy.ndimage import median_filter
-        attention_after_filter = median_filter(raw_attention.double().cpu().numpy(), (1, 1, 3))
-
-        for head_idx in range(num_heads):
-            plt.figure(figsize=(10, 6))
-            head_data = attention_after_filter[head_idx]
-            plt.imshow(head_data, cmap='viridis', aspect='auto', origin='lower')
-            plt.colorbar(label='Attention Value')
-            plt.xlabel('Encoder Steps (Audio Frames)')
-            plt.ylabel('Decoder Steps (Text Tokens)')
-            plt.title(f'After Median Filter - Last Layer - Head {head_idx}')
-            plt.savefig(os.path.join(step_dir, f'head_{head_idx}.png'), dpi=150, bbox_inches='tight')
-            plt.close()
-
-        # Step 3: After softmax - last layer only
-        step_dir = os.path.join(base_dir, '3_after_softmax')
-        os.makedirs(step_dir, exist_ok=True)
-        attention_after_softmax = torch.tensor(attention_after_filter * 1).softmax(dim=-1)
-
-        for head_idx in range(num_heads):
-            plt.figure(figsize=(10, 6))
-            head_data = attention_after_softmax[head_idx].cpu().float().numpy()
-            plt.imshow(head_data, cmap='viridis', aspect='auto', origin='lower')
-            plt.colorbar(label='Attention Value')
-            plt.xlabel('Encoder Steps (Audio Frames)')
-            plt.ylabel('Decoder Steps (Text Tokens)')
-            plt.title(f'After Softmax - Last Layer - Head {head_idx}')
-            plt.savefig(os.path.join(step_dir, f'head_{head_idx}.png'), dpi=150, bbox_inches='tight')
-            plt.close()
-
-        # Step 4: After mean across heads (this will be a single plot)
-        step_dir = os.path.join(base_dir, '4_after_mean_heads')
-        os.makedirs(step_dir, exist_ok=True)
-
-        attention_after_mean = attention_after_softmax.mean(axis=(0))  # Averaging across layer dimension
-        import pdb; pdb.set_trace()
-        plt.figure(figsize=(10, 6))
-        head_data = attention_after_mean.cpu().float().numpy()
-        plt.imshow(head_data, cmap='viridis', aspect='auto', origin='lower')
-        plt.colorbar(label='Attention Value')
-        plt.xlabel('Encoder Steps (Audio Frames)')
-        plt.ylabel('Decoder Steps (Text Tokens)')
-        plt.title(f'After Mean Across Layers - Batch {batch_idx}')
-        plt.savefig(os.path.join(step_dir, f'batch_{batch_idx}.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-
-
-        # Step 5: After normalization (final step before DTW)
-        step_dir = os.path.join(base_dir, '5_after_normalization')
-        os.makedirs(step_dir, exist_ok=True)
-
-        attention_after_norm = attention_after_mean / attention_after_mean.norm(dim=-2, keepdim=True)
-        import pdb; pdb.set_trace()
-        plt.figure(figsize=(10, 6))
-        head_data = attention_after_norm.cpu().float().numpy()
-        plt.imshow(head_data, cmap='viridis', aspect='auto', origin='lower')
-        plt.colorbar(label='Attention Value')
-        plt.xlabel('Encoder Steps (Audio Frames)')
-        plt.ylabel('Decoder Steps (Text Tokens)')
-        plt.title(f'After Normalization - Batch {batch_idx}')
-        plt.savefig(os.path.join(step_dir, f'batch_{batch_idx}.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-
-        print(f"All visualizations saved to {base_dir}/")
-        print(f"Number of heads visualized: {num_heads}")
-
-        dtw_input = torch.tensor( attention_after_norm.unsqueeze(0), device=filtered_tensor.device).double()
-
-        attention_matrix = filtered_tensor.reshape(1, -1, filtered_tensor.shape[-2], filtered_tensor.shape[-1])
-        attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 1, 1))
-        attention_matrix = torch.tensor(attention_matrix * 1).softmax(dim=-1)
-        attention_matrix = attention_matrix.mean(axis=(1))
-        attention_matrix = attention_matrix/attention_matrix.norm(dim=-2, keepdim=True)
-        dtw_input = torch.tensor(attention_matrix, device=filtered_tensor.device).double()
-
-        from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
-        cost, path = dtw_alignment(dtw_input)
-        from nemo.collections.asr.parts.utils.aligner_utils import create_timestamps_from_dtw_path
-# Create encoded_char_offsets
-#         timestamps = create_timestamps_from_dtw_path(path, hypotheses[0].y_sequence, self.tokenizer)
-#         from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
-#         from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
-        
-# # Create encoded_char_offsets with STRING tokens, not IDs
-#         encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
-#             timestamps, hypotheses[0].y_sequence, self.tokenizer
-#         )
-
-#         # Now this should work without the RuntimeError
-#         word_offsets = get_words_offsets(
-#             char_offsets=timestamps['char'],
-#             decode_tokens_to_str=self.decoding.decode_tokens_to_str,
-#             encoded_char_offsets=encoded_char_offsets,
-#             supported_punctuation={',', '.', '!', '?'},
-#         )
-        import pdb; pdb.set_trace()
-        tokens, token_ids = self.retokenize_with_separate_space(hypotheses[0].text)
-        new_decoding_result = self.decoding.decode_predictions_tensor(
-            encoder_hidden_states=enc_states,
-            encoder_input_mask=enc_mask,
-            decoder_input_ids=torch.cat([decoder_input_ids[0], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0),
-            return_hypotheses=trcfg.return_hypotheses,
-        )
-        new_hypotheses, new_xatt_scores = new_decoding_result
-        new_final_tensor = torch.stack([
-            torch.stack([new_xatt_scores[step][layer][:,:,] for step in range(len(new_xatt_scores))], dim=0)
-            for layer in range(4, 8)
-        ], dim=0) 
-        new_final_tensor = new_final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
-        valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
-
-        # Option 1: Process each batch item separately (returns list of tensors)
-        new_filtered_tensors = []
-        for batch_idx in range(new_final_tensor.shape[0]):
             valid_len = valid_lengths[batch_idx].item()
-            # Slice     each batch item to its valid length
-            new_filtered_item = new_final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
-            new_filtered_tensors.append(new_filtered_item)
-        max_valid_len = valid_lengths.max().item()
-        new_filtered_tensor = new_final_tensor[..., :max_valid_len]  
-
-
-        import pdb; pdb.set_trace()
-        new_attention_matrix = new_filtered_tensor.reshape(1, -1, new_filtered_tensor.shape[-2], new_filtered_tensor.shape[-1])
-        new_attention_matrix = median_filter(new_attention_matrix.double().cpu().numpy(), (1, 1, 1, 1))
-        new_attention_matrix = torch.tensor(new_attention_matrix * 1).softmax(dim=-1)
-        new_attention_matrix = new_attention_matrix.mean(axis=(1))
-        new_attention_matrix = new_attention_matrix/new_attention_matrix.norm(dim=-2, keepdim=True)
-        new_dtw_input = torch.tensor(new_attention_matrix, device=new_filtered_tensor.device).double()
-
-        from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
-        new_cost, new_path = dtw_alignment(new_dtw_input)
-        from nemo.collections.asr.parts.utils.aligner_utils import create_timestamps_from_dtw_path
-# Create encoded_char_offsets
-        new_timestamps = create_timestamps_from_dtw_path(new_path, torch.tensor(token_ids), self.tokenizer)
-        from nemo.collections.asr.parts.utils.aligner_utils import create_encoded_char_offsets_from_timestamps
-        from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+            # slicing each batch item to its valid length
+            new_attention_matrix = new_final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
+            
+            # Optional: Visualize attention step-by-step (uncomment to enable)
+            self._visualize_attention_steps(new_attention_matrix, base_dir='./attention_visualizations', batch_idx=batch_idx)
+            
+            # appling all the transformations to the attention matrix
+            new_attention_matrix = self._process_attention_matrix(new_attention_matrix)
+            # DTW takes as an input tensor with batch dimension
+            new_dtw_input = torch.tensor(new_attention_matrix.unsqueeze(0), device=new_attention_matrix.device).double()
+            from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
+            new_cost, new_path = dtw_alignment(new_dtw_input)
+            new_timestamps = create_timestamps_from_dtw_path(new_path, torch.tensor(token_ids), self.tokenizer)
+            new_encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+                new_timestamps, torch.tensor(token_ids), self.tokenizer
+            )
+            new_word_offsets = get_words_offsets(
+                char_offsets=new_encoded_char_offsets,
+                decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+                encoded_char_offsets=new_timestamps['char'],
+                supported_punctuation={',', '.', '!', '?'},
+            )
+            
+            print(encoded_char_offsets)
+            print(new_word_offsets)
         
-# Create encoded_char_offsets with STRING tokens, not IDs
-        import pdb; pdb.set_trace()
-        new_encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
-            new_timestamps,  torch.tensor(token_ids), self.tokenizer
-        )
-
-        # Now this should work without the RuntimeError
-        new_word_offsets = get_words_offsets(
-            char_offsets=new_encoded_char_offsets,
-            decode_tokens_to_str=self.decoding.decode_tokens_to_str,
-            encoded_char_offsets=new_timestamps['char'],
-            supported_punctuation={',', '.', '!', '?'},
-        )
-
-
-
-        print(new_word_offsets)
-        import pdb; pdb.set_trace()
-        import pdb; pdb.set_trace()
-
         merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
-
         del enc_states, enc_mask, decoder_input_ids
-
         if trcfg.timestamps and self.timestamps_asr_model is not None:
             hypotheses = get_forced_aligned_timestamps_with_external_model(
                 audio=[audio.squeeze()[:audio_len] for audio, audio_len in zip(batch.audio, batch.audio_lens)],
