@@ -1065,7 +1065,7 @@ def get_batch_variables(
 import torch
 import torch.nn.functional as F
 
-def dtw_alignment(attention_matrix, return_path=True):
+def dtw_alignment(attention_matrix, return_path=True, allow_vertical=True):
     """
     Compute DTW alignment from attention matrix to cost matrix.
     
@@ -1073,6 +1073,9 @@ def dtw_alignment(attention_matrix, return_path=True):
         attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
                          or [decoder_steps, encoder_steps] for single batch
         return_path: Whether to return the optimal alignment path
+        allow_vertical: If True, allows vertical transitions (i-1, j). 
+                       If False, only allows diagonal (i-1, j-1) and horizontal (i, j-1) transitions.
+                       This prevents skipping encoder frames.
     
     Returns:
         cost: DTW cost
@@ -1082,11 +1085,8 @@ def dtw_alignment(attention_matrix, return_path=True):
         attention_matrix = attention_matrix.reshape(1, attention_matrix.shape[0], attention_matrix.shape[1])
     
     batch_size, M, N = attention_matrix.shape  # M=decoder_steps, N=encoder_steps
-    print("attention_matrix.shape: ", attention_matrix.shape)
     cost_matrix = -attention_matrix
-    import pdb; pdb.set_trace()
-    # plot_raw_cost_matrix(cost_matrix)
-    import pdb; pdb.set_trace()
+
     
     results = []
     
@@ -1101,11 +1101,17 @@ def dtw_alignment(attention_matrix, return_path=True):
         for i in range(1, M + 1):
             for j in range(1, N + 1):
                 dtw_cost = cost[i-1, j-1]
-                dtw_matrix[i, j] = dtw_cost + torch.min(torch.stack([
-                    dtw_matrix[i-1, j],     # insertion
-                    dtw_matrix[i, j-1],     # deletion
-                    dtw_matrix[i-1, j-1]    # match
-                ]))
+                
+                # Build list of allowed transitions
+                transitions = [
+                    dtw_matrix[i, j-1],     # deletion (horizontal/right in path)
+                    dtw_matrix[i-1, j-1]    # match (diagonal)
+                ]
+                
+                if allow_vertical:
+                    transitions.append(dtw_matrix[i-1, j])  # insertion (vertical/up in path)
+                
+                dtw_matrix[i, j] = dtw_cost + torch.min(torch.stack(transitions))
         
         total_cost = dtw_matrix[M, N]
         
@@ -1120,9 +1126,12 @@ def dtw_alignment(attention_matrix, return_path=True):
                 # Find which direction gave minimum cost
                 candidates = [
                     (dtw_matrix[i-1, j-1], (i-1, j-1)),  # diagonal
-                    (dtw_matrix[i-1, j], (i-1, j)),      # up
-                    (dtw_matrix[i, j-1], (i, j-1))       # left
+                    (dtw_matrix[i, j-1], (i, j-1))       # left (horizontal)
                 ]
+                
+                if allow_vertical:
+                    candidates.append((dtw_matrix[i-1, j], (i-1, j)))  # up (vertical)
+                
                 _, (i, j) = min(candidates, key=lambda x: x[0])
             
             path.reverse()
@@ -1134,12 +1143,15 @@ def dtw_alignment(attention_matrix, return_path=True):
         return results[0]
     return results
 
-def dtw_alignment_vectorized(attention_matrix):
+def dtw_alignment_vectorized(attention_matrix, allow_vertical=True):
     """
     Vectorized DTW implementation (faster but more memory intensive).
     
     Args:
         attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
+        allow_vertical: If True, allows vertical transitions (i-1, j). 
+                       If False, only allows diagonal (i-1, j-1) and horizontal (i, j-1) transitions.
+                       This prevents skipping encoder frames.
     
     Returns:
         dtw_costs: Tensor of DTW costs for each batch item
@@ -1160,11 +1172,17 @@ def dtw_alignment_vectorized(attention_matrix):
     for i in range(1, M + 1):
         for j in range(1, N + 1):
             dtw_cost = cost_matrix[:, i-1, j-1]
-            candidates = torch.stack([
-                dtw_matrix[:, i-1, j],     # insertion
-                dtw_matrix[:, i, j-1],     # deletion
-                dtw_matrix[:, i-1, j-1]    # match
-            ], dim=1)
+            
+            # Build list of allowed transitions
+            candidates_list = [
+                dtw_matrix[:, i, j-1],     # deletion (horizontal/right in path)
+                dtw_matrix[:, i-1, j-1]    # match (diagonal)
+            ]
+            
+            if allow_vertical:
+                candidates_list.append(dtw_matrix[:, i-1, j])  # insertion (vertical/up in path)
+            
+            candidates = torch.stack(candidates_list, dim=1)
             dtw_matrix[:, i, j] = dtw_cost + torch.min(candidates, dim=1)[0]
     
     return dtw_matrix[:, M, N]
@@ -1460,12 +1478,11 @@ def create_encoded_char_offsets_from_timestamps(timestamps, y_sequence, tokenize
     
     # Map character timestamps to token strings
     token_idx = 0
-    import pdb; pdb.set_trace()
     for i, char_offset in enumerate(char_timestamps):
         encoded_offset = char_offset.copy()
         
-        # Use string token instead of token ID
-        encoded_offset['char'] = [tokenizer.tokens_to_text(char_offset['char'])]
+        # Use string token instead of token IDs
+        encoded_offset['char'] = [tokenizer.tokens_to_text(char_offset['char'], lang_id='en')]
         # Keep token_id for reference if needed
         
         encoded_char_offsets.append(encoded_offset)

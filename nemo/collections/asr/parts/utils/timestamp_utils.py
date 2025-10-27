@@ -136,11 +136,11 @@ def get_words_offsets(
         if condition_for_word_start(char_token, char_text, next_non_delimeter_token) and not curr_punctuation:
             # If there are any partially or fully built sub-word token ids, construct to text.
             # Note: This is "old" subword, that occurs *after* current sub-word has started.
-
             if built_tokens:
+                #if decode_tokens_to_str(built_tokens) != '' and decode_tokens_to_str(built_tokens) != '<|endoftext|>':
                 word_offsets.append(
                     {
-                        "word": decode_tokens_to_str(built_tokens),
+                        "word": decode_tokens_to_str(built_tokens,lang='en'),
                         "start_offset": char_offsets[previous_token_index]["start_offset"],
                         "end_offset": char_offsets[i - 1]["end_offset"],
                     }
@@ -188,6 +188,7 @@ def get_words_offsets(
     if len(word_offsets) == 0:
         # alaptev: sometimes word_offsets can be empty
         if built_tokens:
+            #if decode_tokens_to_str(built_tokens) != '' and decode_tokens_to_str(built_tokens) != '<|endoftext|>':
             word_offsets.append(
                 {
                     "word": decode_tokens_to_str(built_tokens),
@@ -208,10 +209,12 @@ def get_words_offsets(
         # If there are any remaining tokens left, inject them all into the final word offset.
         # Note: The start offset of this token is the start time of the first token inside build_token.
         # Note: The end offset of this token is the end time of the last token inside build_token
+
         if built_tokens:
+            #if decode_tokens_to_str(built_tokens) != '' and decode_tokens_to_str(built_tokens) != '<|endoftext|>':
             word_offsets.append(
                 {
-                    "word": decode_tokens_to_str(built_tokens),
+                    "word": decode_tokens_to_str(built_tokens,lang='en'),
                     "start_offset": char_offsets[previous_token_index]["start_offset"],
                     "end_offset": char_offsets[-1]["end_offset"],
                 }
@@ -220,7 +223,7 @@ def get_words_offsets(
                 word_offsets[-1]["start"] = char_offsets[previous_token_index]["start"]
             if "end" in char_offset:
                 word_offsets[-1]["end"] = char_offsets[-1]["end"]
-
+    
     return word_offsets
 
 

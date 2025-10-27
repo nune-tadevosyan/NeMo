@@ -122,7 +122,7 @@ class AggregateTokenizer(TokenizerSpec):
             tokens = tokens.tolist()
 
         tokenizer = self.tokenizers_dict[lang_id]
-        return tokenizer.decode_pieces(tokens)
+        return tokenizer.tokenizer.decode_pieces(tokens)
 
     def ids_to_text(self, ids):
         if isinstance(ids, (np.ndarray, torch.Tensor)):
@@ -220,6 +220,7 @@ class AggregateTokenizer(TokenizerSpec):
             langs = [langs]
 
         ids = []
+
         for i, token in enumerate(tokens):
             lang_id = langs[i]
             ids.append(self.token_to_id(token, lang_id))
@@ -258,6 +259,7 @@ class TokenizerWrapper:
         return self._impl(text, lang)
 
     def _call_agg_tokenizer(self, text: str, lang: str | None = None):
+        lang='en'
         assert lang is not None, "Expected 'lang' to be set for AggregateTokenizer."
         return self._tokenizer.text_to_ids(text, lang)
 

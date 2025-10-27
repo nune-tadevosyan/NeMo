@@ -217,7 +217,6 @@ class MultiHeadAttention(nn.Module):
         extra_output = {}
         if self.return_xatt_scores:
             extra_output['xatt_scores'] = attention_scores
-
         return output_states, extra_output
 
 

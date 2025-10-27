@@ -408,24 +408,58 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         """Returns length penalty according to https://arxiv.org/pdf/1609.08144.pdf"""
         return ((5 + lengths) / 6).pow(alpha)
 
+    @staticmethod
+    def average_first_n_xatt_scores(all_xatt_scores, n=5):
+        """
+        Average the first n elements of all_xatt_scores and concatenate with the rest.
+        
+        Args:
+            all_xatt_scores: List of lists of tensors. Structure:
+                             [[tensor1, tensor2, ...], [tensor1, tensor2, ...], ...]
+            n: Number of first elements to average (default: 10)
+        
+        Returns:
+            List with the first n elements averaged into one, followed by the rest
+        """
+        if len(all_xatt_scores) <= n:
+            # If we have fewer elements than n, just return as is
+            return all_xatt_scores
+        
+        # Take the first n elements``
+        first_n = all_xatt_scores[:n]
+        
+        # Average across each position in the inner lists
+        num_layers = len(first_n[0])  # Number of tensors in each inner list
+        averaged_element = []
+        
+        for layer_idx in range(num_layers):
+            # Stack tensors from the same layer position across first n elements
+            tensors_to_avg = [first_n[i][layer_idx] for i in range(n)]
+            stacked = torch.stack(tensors_to_avg, dim=0)
+            # Average along the first dimension
+            averaged_tensor = torch.mean(stacked, dim=0)
+            averaged_element.append(averaged_tensor)
+        
+        # Concatenate averaged element with the rest
+        return [averaged_element] + all_xatt_scores[n:]
+
     def _forward(
         self, decoder_input_ids=None, encoder_hidden_states=None, encoder_input_mask=None, return_beam_scores=False
     ):
         tgt, batch_size, max_generation_length = self._prepare_for_search(decoder_input_ids, encoder_hidden_states)
-        import pdb; pdb.set_trace()
         # generate initial buffer of beam_size prefixes-hypotheses
-        print("418")
         
         log_probs, decoder_mems_list, xatt_scores_initial = self._one_step_forward(
             tgt, encoder_hidden_states, encoder_input_mask, None, 0
         )
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         all_xatt_scores = []
         for s in range(xatt_scores_initial[0].shape[2]):
             step_xatt_scores = []
             for l in range(len(xatt_scores_initial)):
                 step_xatt_scores.append(xatt_scores_initial[l][:, :, s, :].unsqueeze(2))
             all_xatt_scores.append(step_xatt_scores)
+        
 
         # all_xatt_scores.append([xatt_scores_initial[i] for i in range(len(xatt_scores_initial))])
         # Store cross attention scores for each step
@@ -434,9 +468,23 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         #     all_xatt_scores.append(xatt_scores_initial)
         scores, prefixes = torch.topk(log_probs.permute(0, 2, 1), self.beam_size, dim=1)
         scores, prefixes = scores.view(-1, 1), prefixes.view(-1, 1)
-
+        
         # repeat init target prefixes and cached memory states beam_size times
         prefixes = torch.cat((tgt.repeat(1, self.beam_size).view(-1, tgt.shape[1]), prefixes), dim=1)
+        best_guesses = (
+            torch.argmax(scores.view(-1, self.beam_size), dim=1, keepdim=True).repeat(1, prefixes.size(1)).unsqueeze(1)
+        )
+        tgt = prefixes.view(batch_size, self.beam_size, -1).gather(1, best_guesses).squeeze(1)
+
+        if tgt[0][-1]==self.eos:
+            # Average first 10 elements of all_xatt_scores
+            #import pdb; pdb.set_trace()
+            processed_xatt_scores = self.average_first_n_xatt_scores(all_xatt_scores)
+            processed_xatt_scores  = processed_xatt_scores[:-1]
+            if return_beam_scores:
+                return prefixes, scores, tgt, processed_xatt_scores
+            else:
+                return tgt, processed_xatt_scores
         for j in range(len(decoder_mems_list)):
             decoder_mems_list[j] = decoder_mems_list[j].repeat(self.beam_size, 1, 1)
 
@@ -460,7 +508,6 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
 
         tgt_len = tgt.size(-1)
         for i in range(tgt_len, max_generation_length + tgt_len):
-            print(f"i {i}")
             # mask all finished hypotheses to exclude them from beam
             pad_mask = pad_profile.repeat(1, self.beam_size)
 
@@ -472,8 +519,6 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
             # Store cross attention scores for this step
     
             if xatt_scores_step is not None:
-                
-                print(xatt_scores_step[3].shape)
                 all_xatt_scores.append(xatt_scores_step)
             scores_i, prefixes_i = torch.topk(log_probs[:, -1, :], self.beam_size, dim=-1)
 
@@ -530,7 +575,7 @@ class BeamSearchSequenceGenerator(GreedySequenceGenerator):
         tgt = prefixes.view(batch_size, self.beam_size, -1).gather(1, best_guesses).squeeze(1)
 
         if return_beam_scores:
-            return prefixes, scores * len_penalties, tgt, all_xatt_scores[9:]
+            return prefixes, scores * len_penalties, tgt, all_xatt_scores[5:]
         else:
             return tgt, all_xatt_scores[9:]
 
@@ -1159,7 +1204,6 @@ class BeamSearchSequenceGeneratorWithLanguageModel(GreedySequenceGenerator):
         prefixes_len = torch.zeros_like(scores).fill_(prefixes.size(1) + 1)
 
         for i in range(max_generation_length):
-            print(f"i {i}")
             # mask all finished hypotheses to exclude them from beam
             pad_mask = pad_profile.repeat(1, self.beam_size)
 

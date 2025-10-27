@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import string
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -68,7 +69,13 @@ from nemo.core.neural_types import (
 from nemo.core.neural_types.elements import AudioSignal, LabelsType
 from nemo.utils import logging, model_utils
 from nemo.utils.app_state import AppState
-
+from nemo.collections.asr.parts.utils.aligner_utils import (
+    create_encoded_char_offsets_from_timestamps,
+    create_timestamps_from_dtw_path,
+    dtw_alignment,
+)
+from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets, get_segment_offsets
+import dtw
 __all__ = ['EncDecMultiTaskModel']
 
 
@@ -549,7 +556,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 prompt['timestamp'] = timestamps
             else:
                 prompt['timestamp'] = 'no'
-
+        import pdb; pdb.set_trace()
         if override_config is None:
             trcfg = MultiTaskTranscriptionConfig(
                 batch_size=batch_size,
@@ -739,7 +746,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             )
         print("input_signal.shape: ")
 
-        import pdb; pdb.set_trace()
         
         if not has_processed_signal:
             processed_signal, processed_signal_length = self.preprocessor(
@@ -759,7 +765,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
         transf_log_probs = None
         xatt_scores_list = None  # Initialize cross-attention scores
-        import pdb; pdb.set_trace()
         if transcript is not None:
             dec_mask = lens_to_mask(transcript_length, transcript.shape[1]).to(transcript.dtype)
             dec_states, xatt_scores_list = self.transf_decoder(  # Capture both outputs
@@ -767,7 +772,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             )
             transf_log_probs = self.log_softmax(hidden_states=dec_states)
 
-        import pdb; pdb.set_trace()
         #return transf_log_probs, encoded_len, enc_states, enc_mask, xatt_scores_list  # Return cross-attention scores
         return transf_log_probs, encoded_len, enc_states, enc_mask
     # PTL-specific methods
@@ -1029,10 +1033,40 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         attention_after_sharpen = np.clip(attention_after_sharpen, 0, None)
         return attention_after_sharpen
     
+    def _visualize_avereged(self,
+        attention_matrix: torch.Tensor,
+        base_dir: str = './attention',
+        batch_idx: int = 0
+    ):
+        """
+        Visualize averaged attention matrix.
+        """
+        import os
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import median_filter
+        L, H, T, F = attention_matrix.shape
+        step_dir = os.path.join(base_dir, f'averaged')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'averaged'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_matrix[layer_idx, head_idx].cpu().float().numpy(), 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'ALll layers and heads averaged')
+                plt.savefig(os.path.join(step_dir, f'averaged', f'averaged.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+
     def _visualize_attention_steps(
         self,
         attention_matrix: torch.Tensor,
-        base_dir: str = './attention_visualizations',
+        base_dir: str = './attention_visualizations_batch',
         batch_idx: int = 0
     ):
         """
@@ -1050,11 +1084,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         from scipy.ndimage import median_filter
-        
+        base_dir += f'_batch_{batch_idx}'
         L, H, T, F = attention_matrix.shape
         
         # Step 1: Raw attention (after masking)
-        step_dir = os.path.join(base_dir, '1_raw_attention')
+        step_dir = os.path.join(base_dir, f'1_raw_attention')
         for layer_idx in range(L):
             for head_idx in range(H):
                 os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
@@ -1197,111 +1231,125 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             return_hypotheses=trcfg.return_hypotheses,
         )
         hypotheses, xatt_scores = decoding_result
-        
+        layer_range = range(0,len(xatt_scores[0]))
         final_tensor = torch.stack([
             torch.stack([xatt_scores[step][layer][:,:,] for step in range(len(xatt_scores))], dim=0)
-            for layer in range(4, 8)
+            for layer in layer_range
         ], dim=0) # Layer x Steps x 1 x  H X 1 x frames 
         final_tensor = final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
         valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
     
-        filtered_tensors = []
-        for batch_idx in range(final_tensor.shape[0]):
-            # step 1: apply mask from encoder to remove invalid elements
-            # mask comes from preprocessor
-            valid_len = valid_lengths[batch_idx].item()
-            attention_matrix = final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
+        # for batch_idx in range(final_tensor.shape[0]):
+        #     # step 1: apply mask from encoder to remove invalid elements
+        #     # mask comes from preprocessor
+        #     valid_len = valid_lengths[batch_idx].item()
+        #     attention_matrix = final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
 
-            # Optional: Visualize attention step-by-step (uncomment to enable)
-            self._visualize_attention_steps(attention_matrix, base_dir='./attention_visualizations', batch_idx=batch_idx)
+        #     # Optional: Visualize attention step-by-step (uncomment to enable)
+        #     #self._visualize_attention_steps(attention_matrix, base_dir='./attention_visualizations', batch_idx=batch_idx)
             
-            attention_matrix = self._process_attention_matrix(attention_matrix)
+        #     attention_matrix = self._process_attention_matrix(attention_matrix,kernel_size=(1, 1, 3))
             
-            # DTW takes as an input tensor with batch dimension
-            dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
+        #     # DTW takes as an input tensor with batch dimension
+        #     dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
 
-            from nemo.collections.asr.parts.utils.aligner_utils import (
-                create_encoded_char_offsets_from_timestamps,
-                create_timestamps_from_dtw_path,
-                dtw_alignment,
-            )
-            from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
-            cost, path = dtw_alignment(dtw_input)
-            timestamps = create_timestamps_from_dtw_path(path, hypotheses[batch_idx].y_sequence, self.tokenizer)
-            encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
-                timestamps, hypotheses[batch_idx].y_sequence, self.tokenizer
-            )
-            word_offsets = get_words_offsets(
-                char_offsets=encoded_char_offsets,
-                decode_tokens_to_str=self.decoding.decode_tokens_to_str,
-                encoded_char_offsets=timestamps['char'],
-                supported_punctuation={',', '.', '!', '?'},
-            )
+        #     from nemo.collections.asr.parts.utils.aligner_utils import (
+        #         create_encoded_char_offsets_from_timestamps,
+        #         create_timestamps_from_dtw_path,
+        #         dtw_alignment,
+        #     )
+        #     from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
             
-            print(encoded_char_offsets)
-            print(word_offsets)
+        #     # timestamps = create_timestamps_from_dtw_path(path, hypotheses[batch_idx].y_sequence, self.tokenizer)
+        #     # encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+        #     #     timestamps, hypotheses[batch_idx].y_sequence, self.tokenizer
+        #     # )
+        #     # word_offsets = get_words_offsets(
+        #     #     char_offsets=encoded_char_offsets,
+        #     #     decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+        #     #     encoded_char_offsets=timestamps['char'],
+        #     #     supported_punctuation={',', '.', '!', '?'},
+        #     # )
+            
+            # print(encoded_char_offsets)
+            # print(word_offsets)
         
         # ------------------------------------------------------------
         # Option 2: with retokenization
-        for batch_idx in range(final_tensor.shape[0]):
-            tokens, token_ids = self.retokenize_with_separate_space(hypotheses[batch_idx].text)
+            
+        for batch_idx in range(enc_states.shape[0]):
+            #tokens, token_ids = self.retokenize_with_separate_space(hypotheses[batch_idx].text)
+            tokens, token_ids = self.retokenize_with_separate_space_no_punctuation(hypotheses[batch_idx].text)
             new_decoder_input_ids = torch.cat([decoder_input_ids[batch_idx], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0)
             new_decoding_result = self.decoding.decode_predictions_tensor(
-                encoder_hidden_states=enc_states,
-                encoder_input_mask=enc_mask,
-                decoder_input_ids=torch.cat([decoder_input_ids[0], torch.tensor(token_ids).to(decoder_input_ids.device)]).unsqueeze(0),
+                encoder_hidden_states=enc_states[batch_idx].unsqueeze(0),
+                encoder_input_mask=enc_mask[batch_idx].unsqueeze(0),
+                decoder_input_ids=new_decoder_input_ids,
                 return_hypotheses=trcfg.return_hypotheses,
             )
+
             new_hypotheses, new_xatt_scores = new_decoding_result
             new_final_tensor = torch.stack([
-                torch.stack([new_xatt_scores[step][layer][:,:,] for step in range(len(new_xatt_scores))], dim=0)
-                for layer in range(0, 8)
+                torch.stack([new_xatt_scores[step][layer][:, :,] for step in range(len(new_xatt_scores))], dim=0)
+                for layer in layer_range
             ], dim=0)
             new_final_tensor = new_final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
             valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
 
             valid_len = valid_lengths[batch_idx].item()
             # slicing each batch item to its valid length
-            new_attention_matrix = new_final_tensor[batch_idx, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
+            new_attention_matrix = new_final_tensor[0, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
             
             # Optional: Visualize attention step-by-step (uncomment to enable)
-            self._visualize_attention_steps(new_attention_matrix, base_dir='./attention_visualizations', batch_idx=batch_idx)
-            
+            #self._visualize_attention_steps(new_attention_matrix, base_dir='./attention_visualizations_retokenized', batch_idx=batch_idx)
             # appling all the transformations to the attention matrix
-            new_attention_matrix = self._process_attention_matrix(new_attention_matrix)
+            new_attention_matrix = self._process_attention_matrix(new_attention_matrix, kernel_size=(1, 1, 3))
             # DTW takes as an input tensor with batch dimension
             new_dtw_input = torch.tensor(new_attention_matrix.unsqueeze(0), device=new_attention_matrix.device).double()
+            import pdb; pdb.set_trace()
+            #self._visualize_avereged(new_attention_matrix.unsqueeze(0).unsqueeze(0),)
             from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
-            new_cost, new_path = dtw_alignment(new_dtw_input)
+            new_cost, new_path = dtw_alignment(new_dtw_input, allow_vertical=True)
             new_timestamps = create_timestamps_from_dtw_path(new_path, torch.tensor(token_ids), self.tokenizer)
             new_encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
                 new_timestamps, torch.tensor(token_ids), self.tokenizer
             )
+            #print(f"new_path {new_path}")
+            import pdb; pdb.set_trace()
             new_word_offsets = get_words_offsets(
                 char_offsets=new_encoded_char_offsets,
                 decode_tokens_to_str=self.decoding.decode_tokens_to_str,
                 encoded_char_offsets=new_timestamps['char'],
                 supported_punctuation={',', '.', '!', '?'},
+                
             )
-            
-            print(encoded_char_offsets)
-            print(new_word_offsets)
-        
-        merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
+            clean_word_offsets = []
+            for new_word_offset in new_word_offsets:
+                if not ( new_word_offset['word'] == '' or new_word_offset['word'] == '<|endoftext|>' or new_word_offset['word'] == ' \u2047 '):
+                    clean_word_offsets.append(new_word_offset)
+            segment_offsets = get_segment_offsets(
+                word_offsets=clean_word_offsets,
+                segment_delimiter_tokens=['.', '!', '?'],
+                supported_punctuation={'.', '!', '?'},
+            )
+            #print(new_timestamps)
+            hypotheses[batch_idx].timestamp= {'word': clean_word_offsets, 'segment': segment_offsets }
+
+        merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1 and False
         del enc_states, enc_mask, decoder_input_ids
-        if trcfg.timestamps and self.timestamps_asr_model is not None:
-            hypotheses = get_forced_aligned_timestamps_with_external_model(
-                audio=[audio.squeeze()[:audio_len] for audio, audio_len in zip(batch.audio, batch.audio_lens)],
-                batch_size=len(batch.audio),
-                external_ctc_model=self.timestamps_asr_model,
-                main_model_predictions=hypotheses,
-                timestamp_type='char' if merge_to_be_done else ['word', 'segment'],
-                viterbi_device=trcfg._internal.device,
-            )
-        elif trcfg.timestamps:
-            hypotheses = process_aed_timestamp_outputs(
-                hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
-            )
+        # if trcfg.timestamps and self.timestamps_asr_model is not None:
+        #     hypotheses = get_forced_aligned_timestamps_with_external_model(
+        #         audio=[audio.squeeze()[:audio_len] for audio, audio_len in zip(batch.audio, batch.audio_lens)],
+        #         batch_size=len(batch.audio),
+        #         external_ctc_model=self.timestamps_asr_model,
+        #         main_model_predictions=hypotheses,
+        #         timestamp_type='char' if merge_to_be_done else ['word', 'segment'],
+        #         viterbi_device=trcfg._internal.device,
+        #     )
+        # elif trcfg.timestamps:
+        #     hypotheses = process_aed_timestamp_outputs(
+        #         hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
+        #     )
         if merge_to_be_done:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hypotheses,
@@ -1342,7 +1390,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 - token_ids: List of corresponding token IDs
         """
         # Get BPE tokens from the tokenizer
-        bpe_tokens = self.tokenizer.text_to_tokens(text)
+        bpe_tokens = self.tokenizer.text_to_tokens(text, lang_id = 'en')
         
         # Add '_' token at the start
         processed_tokens = []
@@ -1367,12 +1415,70 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 processed_tokens.append(token)
         
         # Add '_' token at the end
-        import pdb; pdb.set_trace()
         processed_tokens.append('▁')
-        
+        processed_tokens.append(self.tokenizer.ids_to_tokens([self.tokenizer.eos_id])[0])
         # Get token IDs for the processed tokens
-        token_ids = self.tokenizer.tokens_to_ids(processed_tokens)
+        token_ids = []
+        for token in processed_tokens:
+            token_ids.append(self.tokenizer.tokens_to_ids(token, langs='en')[0])
+        #token_ids = self.tokenizer.tokens_to_ids(processed_tokens[0], lang_id='en')
+        return processed_tokens, token_ids
+
+    def retokenize_with_separate_space_no_punctuation(self, text: str):
+        """
+        Retokenize BPE text by removing all punctuations first, then separating underscore prefix from tokens.
         
+        This function first removes all punctuation characters from the text, then performs the same
+        retokenization process as retokenize_with_separate_space():
+        1. Removes all punctuation characters
+        2. Splits tokens that start with '_' (or '▁') into:
+           a. A separate space token ('_' or '▁')
+           b. The remaining token without the prefix
+        3. Adds '_' token at the start and end of the sequence
+        
+        Args:
+            text: Input text string to retokenize
+            
+        Returns:
+            tuple: (tokens, token_ids) where:
+                - tokens: List of token strings with underscores separated
+                - token_ids: List of corresponding token IDs
+        """
+        # Remove all punctuation from the text
+        text_no_punct = text.translate(str.maketrans('', '', string.punctuation))
+        
+        # Get BPE tokens from the tokenizer
+        bpe_tokens = self.tokenizer.text_to_tokens(text_no_punct, lang_id = 'en')
+        
+        # Add '_' token at the start
+        processed_tokens = []
+        
+        # Process tokens to separate space markers
+        for token in bpe_tokens:
+            # Check if token starts with underscore (common BPE space marker)
+            # Could be '_' or '▁' (U+2581) depending on tokenizer
+            if token.startswith('_') or token.startswith('▁'):
+                space_char = token[0]  # Get the space marker character
+                rest_of_token = token[1:]  # Get the rest of the token
+                
+                if rest_of_token:
+                    # Split into space token and remaining token
+                    processed_tokens.append(space_char)
+                    processed_tokens.append(token)
+                else:
+                    # Token is just the space character
+                    processed_tokens.append(space_char)
+            else:
+                # Token doesn't start with space marker, keep as is
+                processed_tokens.append(token)
+        
+        # Add '_' token at the end
+        processed_tokens.append('▁')
+        processed_tokens.append(self.tokenizer.ids_to_tokens([self.tokenizer.eos_id])[0])
+        # Get token IDs for the processed tokens
+        token_ids = []
+        for token in processed_tokens:
+            token_ids.append(self.tokenizer.tokens_to_ids(token, langs='en')[0])
         return processed_tokens, token_ids
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':

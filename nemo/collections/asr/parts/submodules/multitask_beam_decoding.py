@@ -278,7 +278,6 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
         * Remove BOS, EOS, and PAD ids from the predictions.
         Modifies results in-place.
         """
-        import pdb; pdb.set_trace()
         if decoder_input_ids is not None:
             assert (
                 len(packed_result) == decoder_input_ids.shape[0]
