@@ -579,6 +579,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
 
         results = super().transcribe(audio=audio, override_config=trcfg)
+
         if trcfg.enable_chunking:
             results = merge_all_hypotheses(results, trcfg.timestamps, self.encoder.subsampling_factor)
 
@@ -1057,6 +1058,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
+
         if merge_to_be_done:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hypotheses,
@@ -1068,11 +1070,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 decoding=self.decoding,
             )
             # Inject the id of the cut to hypothese to later be used for separate batches
-            setattr(merged_hypotheses, 'id', batch.cuts[0].id.split("-", 1)[0])
+            setattr(merged_hypotheses, 'id', batch.cuts[0].id.rsplit('-', 1)[0])
             return [merged_hypotheses]
 
         if trcfg.enable_chunking and len(hypotheses) == 1:
-            setattr(hypotheses[0], 'id', batch.cuts[0].id.split("-", 1)[0])
+            setattr(hypotheses[0], 'id', batch.cuts[0].id)
         return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
