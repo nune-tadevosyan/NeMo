@@ -574,7 +574,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # Check if it is provided as a list of strings
             is_one_audio = is_one_audio or (isinstance(audio, list) and len(audio) == 1)
             # Check if chunking will be enabled
-            trcfg.enable_chunking = is_one_audio or trcfg.batch_size == 1 and self.timestamps_asr_model
+            trcfg.enable_chunking = (is_one_audio or trcfg.batch_size == 1) and self.timestamps_asr_model is not None
             if not trcfg.enable_chunking:
                 logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
 
@@ -595,7 +595,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         world_size = config.get("world_size", self.world_size)
         enable_chunking = config.get("enable_chunking", False)
         # Adding a check for availability of timestamps_asr_model for differentating between Canary versions.
-        enable_chunking = enable_chunking and self.timestamps_asr_model
+        enable_chunking = enable_chunking and self.timestamps_asr_model is not None
 
         if enable_chunking:
             # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
@@ -924,7 +924,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         audio_files = self._may_be_make_dict_and_fix_paths(audio_files, manifest_filepath, trcfg)
 
         ds_config = super()._transcribe_input_manifest_processing(audio_files, temp_dir, trcfg)
-        if trcfg.enable_chunking and self.timestamps_asr_model:
+        if trcfg.enable_chunking and self.timestamps_asr_model is not None:
             ds_config['enable_chunking'] = True
         return ds_config
 
@@ -1062,7 +1062,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
 
-        if merge_to_be_done and self.timestamps_asr_model:
+        if merge_to_be_done and self.timestamps_asr_model is not None:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hypotheses,
                 encoded_len=encoded_len,
@@ -1102,7 +1102,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             batch_size = min(config['batch_size'], len(config['paths2audio_files']))
-        enable_chunking = config.get('enable_chunking', False) and self.timestamps_asr_model
+        enable_chunking = config.get('enable_chunking', False) and self.timestamps_asr_model is not None
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,
