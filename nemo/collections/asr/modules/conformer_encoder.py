@@ -326,6 +326,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         use_pytorch_sdpa: bool = False,
         use_pytorch_sdpa_backends=None,
         sync_max_audio_length: bool = True,
+        use_mamba_only: bool = False,
+        mamba_d_model: int = 512,
+        mamba_expand: int = 2 
     ):
         super().__init__()
         d_ff = d_model * ff_expansion_factor
@@ -468,6 +471,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 use_bias=use_bias,
                 use_pytorch_sdpa=self.use_pytorch_sdpa,
                 use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                use_mamba_only=use_mamba_only,
+                mamba_d_model=mamba_d_model,
+                mamba_expand=mamba_expand,
             )
             self.layers.append(layer)
 
