@@ -589,7 +589,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # Check if chunking will be enabled
             trcfg.enable_chunking = (is_one_audio or trcfg.batch_size == 1) and self.timestamps_asr_model is not None
             
-            if not override_config.enable_chunking:
+            if not trcfg.enable_chunking:
                 logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
 
         results = super().transcribe(audio=audio, override_config=trcfg)
