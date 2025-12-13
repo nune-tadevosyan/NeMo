@@ -220,6 +220,7 @@ def test_merge_all_hypotheses():
     texts = {m.text for m in merged_list}
     assert texts == {"a b", "c d"}
 
+
 @pytest.mark.unit
 def test_merge_all_hypotheses_with_cut_segmented_suffix():
     def H(text, id_):

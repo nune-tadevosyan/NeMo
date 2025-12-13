@@ -212,6 +212,7 @@ def join_char_level_timestamps(
 
     return char_timestamps
 
+
 def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
     """
     Normalize hypothesis IDs so that segmented continuations share the same group ID.
@@ -235,6 +236,7 @@ def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
 
     return f'{prefix}-0'
 
+
 def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600):
     """
     Group hypotheses by ID and merge each group into a single hypothesis.
@@ -254,7 +256,6 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     for h in hypotheses_list:
         # This will form the current ids of the same audio file
         current_id = _normalize_hypothesis_group_id(h.id)
-
 
         # If this is a new ID (different from previous), process the accumulated hypotheses
         if prev_id is not None and current_id != prev_id:
