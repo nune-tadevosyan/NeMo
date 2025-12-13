@@ -15,16 +15,20 @@
 import os
 import shutil
 import tempfile
+import json
 
 import pytest
 import torch
 from lhotse import CutSet, MonoCut
 from lhotse.testing.dummies import DummyManifest
 from omegaconf import DictConfig
+from lightning.pytorch import Trainer
 
+import nemo.collections.asr.models.rnnt_models as rnnt_models
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
+from nemo.collections.asr.parts.mixins import TranscribeConfig
 from nemo.collections.asr.parts.submodules import rnnt_beam_decoding as beam_decode
 from nemo.collections.asr.parts.submodules import rnnt_greedy_decoding as greedy_decode
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
@@ -35,6 +39,48 @@ from nemo.core.utils.numba_utils import __NUMBA_MINIMUM_VERSION__
 NUMBA_RNNT_LOSS_AVAILABLE = numba_utils.numba_cpu_is_supported(
     __NUMBA_MINIMUM_VERSION__
 ) or numba_utils.numba_cuda_is_supported(__NUMBA_MINIMUM_VERSION__)
+
+
+def _install_transcribe_stub(monkeypatch, capture, hyp_id):
+    def _transcribe(
+        self,
+        *,
+        audio,
+        batch_size,
+        return_hypotheses,
+        num_workers,
+        channel_selector,
+        augmentor,
+        verbose,
+        timestamps,
+        override_config,
+        partial_hypothesis,
+        enable_chunking,
+        **kwargs,
+    ):
+        capture['enable_chunking'] = enable_chunking
+        capture['override_config'] = override_config
+        hyp = Hypothesis(score=0.0, y_sequence=torch.zeros(1, dtype=torch.long))
+        setattr(hyp, 'id', hyp_id)
+        return [hyp]
+
+    monkeypatch.setattr(ASRModel, 'transcribe', _transcribe, raising=False)
+
+
+def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, raise_error=False):
+    def _merge(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
+        if merge_capture is not None:
+            merge_capture['called'] = True
+            merge_capture['timestamps'] = timestamps
+            merge_capture['subsampling_factor'] = subsampling_factor
+            merge_capture['timestamps_type'] = timestamps_type
+        if raise_error:
+            raise AssertionError("Chunk merge should not be triggered when chunking is disabled.")
+        if callable(return_value):
+            return return_value(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type)
+        return return_value
+
+    monkeypatch.setattr(rnnt_models, 'merge_all_hypotheses', _merge)
 
 
 @pytest.fixture()
@@ -106,7 +152,7 @@ def asr_model(test_data_dir):
 
 
 class NestedRNNTModel(ASRModel):
-    def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
+    def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         super().__init__(cfg=cfg, trainer=trainer)
 
         if 'inner_model' in self.cfg:
@@ -333,6 +379,112 @@ class TestEncDecRNNTBPEModel:
         asr_model.change_decoding_strategy(decoding_cfg=new_strategy)
         assert isinstance(asr_model.decoding.decoding, beam_decode.BeamRNNTInfer)
         assert asr_model.decoding.decoding.search_type == "alsd"
+
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_transcribe_parallel_chunking_long_audio(self, parakeet_tdt_v2):
+        model = asr_model
+        model.eval()
+        import pdb; pdb.set_trace()
+        audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
+        hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
+        assert len(hypotheses) == 1
+        assert isinstance(hypotheses[0], Hypothesis)
+        assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
+        assert hypotheses[0].timestamp == []
+
+        ts_hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=True)
+        assert len(ts_hypotheses) == 1
+        assert isinstance(ts_hypotheses[0], Hypothesis)
+        assert ts_hypotheses[0].text == hypotheses[0].text
+        assert 'word' in ts_hypotheses[0].timestamp
+        assert 'segment' in ts_hypotheses[0].timestamp
+        assert len(ts_hypotheses[0].timestamp['word']) > 0
+        assert len(ts_hypotheses[0].timestamp['segment']) > 0
+        # Monotonicity and validity of word offsets and times
+        words = ts_hypotheses[0].timestamp['word']
+        starts = [w['start'] for w in words]
+        ends = [w['end'] for w in words]
+        assert all(s <= e for s, e in zip(starts, ends))
+        assert all(x <= y for x, y in zip(starts, starts[1:]))
+        assert all(x <= y for x, y in zip(ends, ends[1:]))
+        assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
+        
+        assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
+            [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
+        )
+        # Check that the number of words and segments are consistent
+        assert ts_hypotheses[0].timestamp['segment'][0]['start'] == ts_hypotheses[0].timestamp['word'][0]['start']
+        assert ts_hypotheses[0].timestamp['segment'][-1]['end'] == ts_hypotheses[0].timestamp['word'][-1]['end']
+        assert (
+            ts_hypotheses[0].timestamp['segment'][0]['start_offset']
+            == ts_hypotheses[0].timestamp['word'][0]['start_offset']
+        )
+        assert (
+            ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+        )
+
+    @pytest.mark.unit
+    def test_transcribe_chunking_single_audio_enables_merge(self, asr_model, monkeypatch):
+        captured = {'enable_chunking': None, 'override_config': None}
+        merge_calls = {'called': False}
+        _install_transcribe_stub(monkeypatch, captured, hyp_id='single-cut-0')
+        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-result'])
+
+        outputs = asr_model.transcribe('dummy.wav', batch_size=1, return_hypotheses=True)
+
+        assert captured['enable_chunking'] is True
+        assert merge_calls['called'] is True
+        assert outputs == ['merged-result']
+
+    @pytest.mark.unit
+    def test_transcribe_chunking_manifest_single_entry(self, asr_model, monkeypatch, tmp_path):
+        captured = {'enable_chunking': None}
+        merge_calls = {'called': False}
+        _install_transcribe_stub(monkeypatch, captured, hyp_id='manifest-cut-0')
+        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-manifest'])
+
+        manifest_path = tmp_path / 'single_audio.jsonl'
+        manifest_path.write_text(json.dumps({'audio_filepath': 'dummy.wav', 'duration': 1.23}) + '\n')
+
+        outputs = asr_model.transcribe(str(manifest_path), batch_size=4, return_hypotheses=False)
+
+        assert captured['enable_chunking'] is True
+        assert merge_calls['called'] is True
+        assert outputs == ['merged-manifest']
+
+    @pytest.mark.unit
+    def test_transcribe_chunking_disabled_multiple_inputs(self, asr_model, monkeypatch):
+        captured = {'enable_chunking': None}
+        _install_transcribe_stub(monkeypatch, captured, hyp_id='multi-cut-0')
+        _install_merge_stub(monkeypatch, raise_error=True)
+
+        warnings = []
+        monkeypatch.setattr(rnnt_models.logging, 'warning', lambda message: warnings.append(message))
+
+        outputs = asr_model.transcribe(['a.wav', 'b.wav'], batch_size=2, return_hypotheses=False)
+
+        assert captured['enable_chunking'] is False
+        assert warnings, "Expected chunking warning for batch size > 1."
+        assert 'Chunking is disabled' in warnings[0]
+        assert isinstance(outputs, list)
+        assert isinstance(outputs[0], Hypothesis)
+
+    @pytest.mark.unit
+    def test_transcribe_chunking_override_config_enables_merge(self, asr_model, monkeypatch):
+        captured = {'enable_chunking': None, 'override_config': None}
+        merge_calls = {'called': False}
+        _install_transcribe_stub(monkeypatch, captured, hyp_id='override-cut-0')
+        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-override'])
+
+        override_cfg = TranscribeConfig(batch_size=1, enable_chunking=True)
+        outputs = asr_model.transcribe(['clip.wav', 'clip2.wav'], batch_size=4, override_config=override_cfg)
+
+        assert captured['enable_chunking'] is True
+        assert override_cfg.enable_chunking is True
+        assert merge_calls['called'] is True
+        assert outputs == ['merged-override']
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit

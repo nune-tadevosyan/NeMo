@@ -12,13 +12,148 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from multiprocessing import Value
 import torch
+
+from typing import List, Optional, Tuple
 
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import get_segment_offsets, get_words_offsets
 
 
-def merge_parallel_chunks(hypotheses, encoded_len, model, timestamps, subsampling_factor, window_stride, decoding, is_rnnt=False):
+def find_optimal_chunk_size(
+    total_len: int,
+    min_sec: int = 30,
+    max_sec: int = 40,
+    sample_rate: int = 16000,
+    overlap_sec: float = 1.0,
+) -> int:
+    """
+    Determine the chunk size (in samples) that minimizes padding for the final chunk.
+    """
+    if total_len < max_sec * sample_rate:
+        return total_len
+
+    best_chunk_size = min_sec * sample_rate
+    best_last_chunk_len = 0
+    overlap_size = int(overlap_sec * sample_rate)
+
+    for sec in range(min_sec, max_sec + 1):
+        candidate = sec * sample_rate
+        step_size = candidate - overlap_size
+
+        if step_size <= 0 or candidate > total_len:
+            continue
+
+        n_chunks = (total_len + step_size - 1) // step_size
+        last_chunk_len = total_len - step_size * (n_chunks - 1)
+
+        if last_chunk_len > best_last_chunk_len:
+            best_last_chunk_len = last_chunk_len
+            best_chunk_size = candidate
+
+    return best_chunk_size
+
+
+def chunk_waveform(
+    waveform: torch.Tensor,
+    chunk_range: Optional[List],
+    overlap_sec: float = 1.0,
+    sample_rate: int = 16000,
+) -> Tuple[List[torch.Tensor], List[int]]:
+    """
+    Split a single waveform into overlapping chunks and record each chunk length.
+    """
+    total_len = waveform.shape[0]
+    if chunk_range is None:
+        chunk_size = find_optimal_chunk_size(
+            total_len=total_len,
+            sample_rate=sample_rate,
+            overlap_sec=overlap_sec,
+        )
+    else:
+        if not isinstance(chunk_range, List) or len(chunk_range) != 2:
+            raise ValueError("Chunk size should be list with the minimum and maximum length of the chunk.")
+        chunk_size = find_optimal_chunk_size(
+            total_len=total_len,
+            min_sec=chunk_range[0],
+            max_sec=chunk_range[1],
+            sample_rate=sample_rate,
+            overlap_sec=overlap_sec,
+
+        )
+
+    if chunk_size >= total_len:
+        return [waveform], [total_len]
+
+    overlap_size = int(overlap_sec * sample_rate)
+    step_size = chunk_size - overlap_size
+
+    if step_size <= 0:
+        raise ValueError("chunk_size must be greater than the overlap size.")
+
+    chunks: List[torch.Tensor] = []
+    chunk_lens: List[int] = []
+    start = 0
+
+    while start + overlap_size < total_len:
+        end = min(start + chunk_size, total_len)
+        chunk = waveform[start:end]
+        length = chunk.shape[0]
+
+        if length < chunk_size:
+            pad = torch.zeros(chunk_size - length, dtype=chunk.dtype, device=chunk.device)
+            chunk = torch.cat([chunk, pad], dim=0)
+
+        chunks.append(chunk)
+        chunk_lens.append(length)
+        start += step_size
+
+    return chunks, chunk_lens
+
+
+def chunk_audio_sample(
+    audio: torch.Tensor,
+    audio_lens: torch.Tensor,
+    chunk_range: Optional[List] = None,
+    overlap_sec: float = 1.0,
+    sample_rate: int = 16000,
+) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
+    """
+    Chunk every waveform in ``audio`` and stack the result.
+
+    Returns:
+        chunked_audio: Tensor containing all chunks stacked along batch dim.
+        chunked_lens: Tensor with the true (unpadded) length of each chunk.
+        chunks_per_sample: Number of chunks produced for each original sample.
+    """
+    if audio.ndim != 2 or audio.shape[0] == 0:
+        raise ValueError("chunk_audio_samples expects audio shaped (batch, time) with batch > 0.")
+
+    if audio.shape[0] != 1:
+        raise ValueError("chunk_audio_samples currently expects batch size 1.")
+
+    waveform = audio[0, : audio_lens[0]]
+    sample_chunks, sample_lengths = chunk_waveform(
+        waveform=waveform,
+        chunk_range=chunk_range,
+        overlap_sec=overlap_sec,
+        sample_rate=sample_rate,
+    )
+
+    if not sample_chunks:
+        return audio, audio_lens
+
+    stacked_chunks = torch.stack(sample_chunks, dim=0)
+    stacked_lengths = torch.as_tensor(
+        sample_lengths, dtype=audio_lens.dtype, device=audio_lens.device
+    )
+    return stacked_chunks, stacked_lengths
+
+
+def merge_parallel_chunks(
+    hypotheses, encoded_len, model, timestamps, subsampling_factor, window_stride, decoding, is_rnnt=False, timestamps_type=None,
+):
     """
     Merges hypotheses from parallel chunks into a single hypothesis with proper text,
     token sequences, and timestamps.
@@ -37,17 +172,24 @@ def merge_parallel_chunks(hypotheses, encoded_len, model, timestamps, subsamplin
     """
     # we take the overlap to be 1 second, and count number of tokens in it
     delay = int(1 / (subsampling_factor / 100))
-    # Merge tokens from character level timestamps if timestamps are enabled
+    # Merge tokens from character level timestamps if timestamps are enabled.
     if timestamps:
-        merged_tokens = [char['token_id'] for char in hypotheses[0].timestamp['char']]
+
+        if hypotheses[0].timestamp['char']:
+            merged_tokens = [char['token_id'] for char in hypotheses[0].timestamp['char']]
+        else:
+            # Too much hallucination in the model.
+            raise Warning("Can not provide reliable timestamps for the current audio file.")
     else:
         merged_tokens = hypotheses[0].y_sequence.tolist()
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
-
     for i in range(1, len(hypotheses)):
         if timestamps:
-            data = [char['token_id'] for char in hypotheses[i].timestamp['char']]
+            if hypotheses[i].timestamp['char']:
+                data = [char['token_id'] for char in hypotheses[i].timestamp['char']]
+            else:
+                raise Warning("Can not provide reliable timestamps for the current audio file.")
         else:
             data = hypotheses[i].y_sequence.tolist()
         merged_tokens = lcs_alignment_merge_buffer(
@@ -63,14 +205,12 @@ def merge_parallel_chunks(hypotheses, encoded_len, model, timestamps, subsamplin
 
     # Convert merged tokens to text
     final_text = decoding.decode_tokens_to_str(merged_tokens)
-
     merged_hypotheses = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
         timestamp=([] if not timestamps else {'word': [], 'segment': []}),
     )
-    merged_hypotheses = join_y_sequence(merged_hypotheses, hypotheses)
-    merged_hypotheses = join_confidence_values(merged_hypotheses, hypotheses)
+    merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
     merged_hypotheses.text = final_text
     # Merge timestamps and add word and segment level timestamps
     if timestamps:
@@ -79,27 +219,19 @@ def merge_parallel_chunks(hypotheses, encoded_len, model, timestamps, subsamplin
             for i, x in enumerate(encoded_len.tolist(), start=1)
         ]
         merged_hypotheses = join_timestamp_and_add_word_and_segment_level_timestamps(
-            merged_hypotheses, hypotheses, chunk_offsets, subsampling_factor, window_stride, decoding, merged_tokens, is_rnnt
+            merged_hypotheses,
+            hypotheses,
+            chunk_offsets,
+            subsampling_factor,
+            window_stride,
+            decoding,
+            merged_tokens,
+            timestamps_type
         )
-
     return merged_hypotheses
 
 
-def join_y_sequence(merged_hypothesis, hypotheses):
-    """
-    Concatenate y_sequence tensors from multiple hypotheses into a single sequence.
-
-    Args:
-        merged_hypothesis: Target hypothesis to update with concatenated sequence
-        hypotheses: List of hypotheses containing y_sequence tensors
-
-    Returns:
-        Hypothesis: Updated merged_hypothesis with concatenated y_sequence
-    """
-    merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses])
-    return merged_hypothesis
-
-def update_timestamps(char_timestamps, hypotheses, decoding, is_rnnt=False):
+def update_timestamps(hypotheses, decoding, timestamps_type=None):
     """
     Generate word and segment timestamps from character timestamps.
     
@@ -112,6 +244,8 @@ def update_timestamps(char_timestamps, hypotheses, decoding, is_rnnt=False):
         Hypothesis: Updated merged_hypotheses with word and segment timestamps
     """
     # Create encoded_char_offsets for word/segment generation
+    char_timestamps = hypotheses.timestamp['char']
+
     encoded_char_offsets = []
     for char_offset in char_timestamps:
         enc_char_offset = char_offset.copy()
@@ -129,12 +263,17 @@ def update_timestamps(char_timestamps, hypotheses, decoding, is_rnnt=False):
     # Generate segment-level timestamps from word timestamps
     segment_offsets = get_segment_offsets(word_offsets=word_offsets, segment_delimiter_tokens={'.', '!', '?', "..."})
     # Update the merged hypothesis with word and segment timestamps
-    hypotheses.timestamp['word'] = word_offsets
-    hypotheses.timestamp['segment'] = segment_offsets
-    if is_rnnt:
-        hypotheses.timestamp['char'] = char_timestamps
-
-    return [hypotheses]
+    if timestamps_type is not None:
+        if 'word' in timestamps_type or 'all' in timestamps_type:
+            hypotheses.timestamp['word'] = word_offsets
+        if 'segment' in timestamps_type or 'all' in timestamps_type:
+            hypotheses.timestamp['segment'] = segment_offsets
+        if 'char' in timestamps_type or 'all' in timestamps_type:
+            hypotheses.timestamp['char'] = char_timestamps
+    else:
+        hypotheses.timestamp['word'] = word_offsets
+        hypotheses.timestamp['segment'] = segment_offsets
+    return hypotheses
 
 
 def join_confidence_values(merged_hypothesis, hypotheses):
@@ -176,7 +315,14 @@ def join_confidence_values(merged_hypothesis, hypotheses):
 
 
 def join_timestamp_and_add_word_and_segment_level_timestamps(
-    merged_hypotheses, hypotheses, chunk_offsets, subsampling_factor, window_stride, decoding, merged_tokens=None, is_rnnt=False
+    merged_hypotheses,
+    hypotheses,
+    chunk_offsets,
+    subsampling_factor,
+    window_stride,
+    decoding,
+    merged_tokens=None,
+    timestamps_type=None,
 ):
     """
     Combine character-level timestamps from chunks and generate word/segment timestamps.
@@ -197,9 +343,10 @@ def join_timestamp_and_add_word_and_segment_level_timestamps(
     # First, combine char-level timestamps from all chunks
     char_timestamps = join_char_level_timestamps(
         hypotheses, chunk_offsets, subsampling_factor, window_stride, merged_tokens
-    )
-
-    return update_timestamps(char_timestamps, merged_hypotheses, decoding, is_rnnt)[0]
+    ) 
+    merged_hypotheses.timestamp['char'] = char_timestamps
+    
+    return update_timestamps(merged_hypotheses, decoding, timestamps_type)
 
 def join_char_level_timestamps(
     hypotheses,
@@ -268,7 +415,31 @@ def join_char_level_timestamps(
     return char_timestamps
 
 
-def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, is_rnnt=False):
+def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
+    """
+    Normalize hypothesis IDs so that segmented continuations share the same group ID.
+
+    IDs ending with `_cut_segmented` represent continuations of the chunk whose ID
+    shares the same prefix but ends with `-0`. Only the substring after the final
+    `-` is replaced so prefixes containing additional dashes remain unchanged.
+    """
+    if not isinstance(hypothesis_id, str):
+        return hypothesis_id
+    if 'cut_segmented' not in hypothesis_id:
+        return hypothesis_id
+
+    base_id = hypothesis_id.split('_cut_segmented', 1)[0]
+    if '-' not in base_id:
+        return base_id
+
+    prefix, _ = base_id.rsplit('-', 1)
+    if not prefix:
+        return base_id
+
+    return f'{prefix}-0'
+
+
+def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
     """
     Group hypotheses by ID and merge each group into a single hypothesis.
 
@@ -284,8 +455,8 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     same_audio_hypotheses = []
     all_merged_hypotheses = []
     prev_id = None
+    
     for h in hypotheses_list:
-        # This will form the current ids of the same audio file
         current_id = _normalize_hypothesis_group_id(h.id)
 
         # If this is a new ID (different from previous), process the accumulated hypotheses
@@ -294,7 +465,7 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
 
                 all_merged_hypotheses.append(
                     merge_hypotheses_of_same_audio(
-                        same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, is_rnnt
+                        same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type
                     )
                 )
             same_audio_hypotheses = []
@@ -307,13 +478,15 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     if same_audio_hypotheses:
         all_merged_hypotheses.append(
             merge_hypotheses_of_same_audio(
-                same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, is_rnnt
+                same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type
             )
         )
     return all_merged_hypotheses
 
 
-def merge_hypotheses_of_same_audio(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, is_rnnt=False):
+def merge_hypotheses_of_same_audio(
+    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None
+):
     """
     Merge hypotheses from the same audio source into a single hypothesis.
     Used for combining results when long audio is split into hour-long segments
@@ -331,8 +504,10 @@ def merge_hypotheses_of_same_audio(hypotheses_list, timestamps, subsampling_fact
 
     # Create merged hypothesis with empty initial values
     if timestamps:
-        if is_rnnt:
+        if timestamps_type and 'all' in timestamps_type:
             timestamp_dict = {'char': [], 'word': [], 'segment': []}
+        elif timestamps_type:
+            timestamp_dict = {timestamps_type[0]: []}
         else:
             timestamp_dict = {'word': [], 'segment': []}
     else:
@@ -342,8 +517,7 @@ def merge_hypotheses_of_same_audio(hypotheses_list, timestamps, subsampling_fact
         score=0.0,
         y_sequence=torch.tensor([]),
         timestamp=timestamp_dict,
-    )
-
+    )   
     merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses_list])
 
     # Merge confidence values from all hypotheses
@@ -438,7 +612,7 @@ def merge_hypotheses_of_same_audio(hypotheses_list, timestamps, subsampling_fact
                     else:
                         merged_segment_timestamps.append(segment_info)
             # Merge char timestamps with offset (for RNNT models)
-            if is_rnnt:
+            if timestamps_type:
                 if 'char' in hyp.timestamp and hyp.timestamp['char']:
                     for char_info in hyp.timestamp['char']:
                         if isinstance(char_info, dict):
@@ -476,12 +650,12 @@ def merge_hypotheses_of_same_audio(hypotheses_list, timestamps, subsampling_fact
 
         # Set the merged timestamps
         if timestamps:
-            if is_rnnt:
+            if timestamps_type:
                 merged_hypothesis.timestamp['char'] = merged_char_timestamps
             merged_hypothesis.timestamp['word']= merged_word_timestamps
             merged_hypothesis.timestamp['segment']= merged_segment_timestamps
     elif len(hypotheses_list) == 1 and timestamps:
-        if is_rnnt:
+        if timestamps_type:
             merged_hypothesis.timestamp['char'] = hypotheses_list[0].timestamp['char']
         merged_hypothesis.timestamp['word'] = hypotheses_list[0].timestamp['word']
         merged_hypothesis.timestamp['segment'] = hypotheses_list[0].timestamp['segment']

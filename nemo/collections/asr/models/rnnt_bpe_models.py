@@ -524,6 +524,7 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
                 dataset=LhotseSpeechToTextBpeDataset(
                     tokenizer=self.tokenizer,
                     return_cuts=config.get("do_transcribe", False) or enable_chunking,
+                    enable_chunking=enable_chunking,
                 ),
                 tokenizer=self.tokenizer,
             )

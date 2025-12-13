@@ -239,7 +239,7 @@ def test_merge_all_hypotheses_with_cut_segmented_suffix():
     merged_list = merge_all_hypotheses(
         hypotheses_list=hyps,
         timestamps=False,
-        subsampling_factor=8,
+        subsampling_factor=2,
         chunk_duration_seconds=3600,
     )
 

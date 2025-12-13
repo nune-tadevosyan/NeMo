@@ -724,7 +724,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
 
         prediction_list = hypotheses_list
-
         if isinstance(prediction_list[0], NBestHypotheses):
             hypotheses = []
             all_hypotheses = []
@@ -738,7 +737,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                     timestamp_type = self.cfg.get('rnnt_timestamp_type', 'all')
                     for hyp_idx in range(len(decoded_hyps)):
                         decoded_hyps[hyp_idx] = self.compute_rnnt_timestamps(decoded_hyps[hyp_idx], timestamp_type)
-
+                
                 hypotheses.append(decoded_hyps[0])  # best hypothesis
                 all_hypotheses.append(decoded_hyps)
 

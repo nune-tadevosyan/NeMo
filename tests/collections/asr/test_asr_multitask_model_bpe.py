@@ -1032,10 +1032,8 @@ def test_aed_parallel_chunking(canary_1b_v2):
     hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False)
     assert len(hypotheses) == 1
     assert hypotheses[0].timestamp == []
-
     ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True)
     assert len(ts_hypotheses) == 1
-
     assert ts_hypotheses[0].text == hypotheses[0].text
     assert "char" not in ts_hypotheses[0].timestamp
     assert 'word' in ts_hypotheses[0].timestamp and 'segment' in ts_hypotheses[0].timestamp
@@ -1064,7 +1062,6 @@ def test_aed_parallel_chunking(canary_1b_v2):
         'start': 598.16,
         'end': 598.48,
     }
-    assert ts_hypotheses[0].text == hypotheses[0].text
 
     # Check that the number of words and segments are consistent
     assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()

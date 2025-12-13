@@ -252,11 +252,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
         # Setup encoder adapters (from ASRAdapterModelMixin)
         self.setup_adapters()
+        map_location =self.device 
 
-        if self.cfg.get("restore_timestamps_model", True):
-            timestamps_asr_model = self.__restore_timestamps_asr_model()
-        else:
-            timestamps_asr_model = None
+        timestamps_asr_model = self.__restore_timestamps_asr_model(map_location)
         # Using object.__setattr__ to bypass PyTorch's module registration
         object.__setattr__(self, 'timestamps_asr_model', timestamps_asr_model)
 
@@ -572,6 +570,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             trcfg.timestamps = timestamps
 
         if trcfg.enable_chunking:
+            
             # Check if only one audio is provided with string
             is_manifest = isinstance(audio, str) and audio.endswith(("json", "jsonl"))
             if is_manifest:
@@ -1099,7 +1098,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-
         if merge_to_be_done and self.timestamps_asr_model is not None:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hypotheses,
@@ -1111,7 +1109,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 decoding=self.decoding,
             )
             # Inject the id of the cut to hypothese to later be used for separate batches
-            setattr(merged_hypotheses, 'id', cut_id)
+            setattr(merged_hypotheses, 'id', batch.cuts[0].id)
             return [merged_hypotheses]
 
         if trcfg.enable_chunking:
@@ -1331,7 +1329,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             ],
         }
 
-    def __restore_timestamps_asr_model(self):
+    def __restore_timestamps_asr_model(self, map_location):
         """
         This method is used to restore the external timestamp ASR model that will be used for forced alignment in `.transcribe()`.
         The config and weights are expected to be in the main .nemo file and be named `timestamps_asr_model_config.yaml` and `timestamps_asr_model_weights.ckpt` respectively.
@@ -1370,7 +1368,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             save_restore_connector.model_config_yaml = "timestamps_asr_model_config.yaml"
             save_restore_connector.model_weights_ckpt = "timestamps_asr_model_weights.ckpt"
             external_timestamps_model = ASRModel.restore_from(
-                model_restore_path, save_restore_connector=save_restore_connector
+                model_restore_path, save_restore_connector=save_restore_connector,map_location=map_location
             )
             external_timestamps_model.eval()
 
