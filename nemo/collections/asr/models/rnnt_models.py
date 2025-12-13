@@ -142,7 +142,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
         # Setup encoder adapters (from ASRAdapterModelMixin)
         self.setup_adapters()
-
+        import pdb; pdb.set_trace()
     def setup_optim_normalization(self):
         """
         Helper method to setup normalization of certain parts of the model prior to the optimization step.
@@ -255,6 +255,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
+        enable_chunking: bool = True, 
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -293,7 +294,37 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             * A list of greedy transcript texts / Hypothesis
             * An optional list of beam search transcript texts / Hypothesis / NBestHypothesis.
         """
-
+        if enable_chunking:
+            # Check if only one audio is provided with string
+            is_manifest = isinstance(audio, str) and audio.endswith(("json", "jsonl"))
+            if is_manifest:
+                try:
+                    with open(audio, "r", encoding="utf-8") as manifest_f:
+                        non_empty = 0
+                        for line in manifest_f:
+                            if line.strip():
+                                non_empty += 1
+                                if non_empty > 1:
+                                    break
+                        is_one_audio = non_empty == 1
+                except OSError as e:
+                    logging.warning(f"Failed to inspect manifest '{audio}' for chunking: {e}")
+                    is_one_audio = False
+            else:
+                is_one_audio = isinstance(audio, str) or (isinstance(audio, list) and len(audio) == 1)
+            # Check if chunking will be enabled
+            enable_chunking = (
+                is_one_audio
+                or (override_config.batch_size == 1 if override_config is not None else batch_size == 1)
+            )
+            if not enable_chunking:
+                logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
+        # elif enable_chunking:
+        #     enable_chunking=False
+        #     logging.warning("Chunking currently is not supported for RNNT models.")
+        if override_config is not None:
+            override_config.enable_chunking = enable_chunking
+                
         timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
         if timestamps is not None:
             if timestamps or (override_config is not None and override_config.timestamps):
@@ -305,27 +336,20 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 with open_dict(self.cfg.decoding):
                     self.cfg.decoding.compute_timestamps = True
                     self.cfg.decoding.preserve_alignments = True
-                    if override_config.enable_chunking:
-                        self.cfg.decoding.rnnt_timestamp_type = 'char'
+                    # Adding this check to ensure precise timestamps on chunked files.
             else:
                 return_hypotheses = False
                 with open_dict(self.cfg.decoding):
                     self.cfg.decoding.compute_timestamps = False
-
             self.change_decoding_strategy(self.cfg.decoding, verbose=False)
 
-        if override_config.enable_chunking:
-            # Check if only one audio is provided with string
-            is_one_audio = isinstance(audio, str) and not (audio.endswith("json") or audio.endswith("jsonl"))
-            # Check if it is provided as a list of strings
-            is_one_audio = is_one_audio or (isinstance(audio, list) and len(audio) == 1)
-            # Check if chunking will be enabled
-            override_config.enable_chunking = is_one_audio or (
-                override_config is not None and override_config.batch_size == 1
-            )
-            if not override_config.enable_chunking:
-                logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
-
+        if enable_chunking and timestamps is not None and self.cfg.decoding.rnnt_timestamp_type != 'char':
+            self.final_timestamps_type = self.cfg.decoding.rnnt_timestamp_type
+            self.cfg.decoding.rnnt_timestamp_type = 'char'
+        else: 
+            self.final_timestamps_type = None
+      
+        
         results = super().transcribe(
             audio=audio,
             use_lhotse=use_lhotse,
@@ -339,11 +363,15 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             override_config=override_config,
             # Additional arguments
             partial_hypothesis=partial_hypothesis,
+            enable_chunking=enable_chunking,
         )
-
-        if override_config.enable_chunking:
+        
+        if enable_chunking:
             results = merge_all_hypotheses(
-                results, override_config.timestamps, self.encoder.subsampling_factor, is_rnnt=True
+                hypotheses_list=results,
+                timestamps=(override_config.timestamps if override_config is not None else timestamps), 
+                subsampling_factor=self.encoder.subsampling_factor,
+                timestamps_type=self.final_timestamps_type
             )
         return results
 
@@ -518,6 +546,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                         do_normalize=config.get('normalize_transcripts', False),
                     ),
                     return_cuts=config.get("do_transcribe", False) or enable_chunking,
+                    enable_chunking=enable_chunking,
                 ),
             )
 
@@ -736,7 +765,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         # Spec augment is not applied during evaluation/testing
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         return encoded, encoded_len
 
@@ -978,7 +1006,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
     ) -> Union[List['Hypothesis'], List[List['Hypothesis']]]:
         encoded = outputs.pop('encoded')
         encoded_len = outputs.pop('encoded_len')
-
+    
         hyp = self.decoding.rnnt_decoder_predictions_tensor(
             encoded,
             encoded_len,
@@ -987,15 +1015,12 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         )
         # cleanup memory
         del encoded
-
         if trcfg.timestamps:
             hyp = process_timestamp_outputs(
                 hyp, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-
-        merge_to_be_done = trcfg.enable_chunking and len(hyp) > 1
-        if merge_to_be_done:
-            cuts = outputs.pop('cuts')
+        import pdb; pdb.set_trace()
+        if trcfg.enable_chunking and len(hyp) > 1:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hyp,
                 encoded_len=encoded_len,
@@ -1005,16 +1030,22 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 decoding=self.decoding,
                 is_rnnt=True,
+                timestamps_type=self.final_timestamps_type
             )
-            # Inject the id of the cut to hypothese to later be used for separate batches
-            setattr(merged_hypotheses, 'id', cuts[0].id.split("-", 1)[0])
+            # Inject the id of the cut to hypothesis to later be used for separate batches
+            setattr(merged_hypotheses, 'id', outputs.pop('cuts')[0].id)
             return [merged_hypotheses]
 
-        if trcfg.enable_chunking and len(hyp) == 1:
-            hyp = update_timestamps(hyp[0].timestamp['char'], hyp[0], self.decoding, is_rnnt=True)
-            cuts = outputs.pop('cuts')
-            setattr(hyp[0], 'id', cuts[0].id.split("-", 1)[0])
-        return hyp
+        elif trcfg.enable_chunking:
+            single_hypothesis = hyp[0]
+            if trcfg.timestamps:
+                single_hypothesis = update_timestamps(
+                    single_hypothesis, self.decoding, self.final_timestamps_type
+                )
+            setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
+            return [single_hypothesis]
+        else:
+            return hyp
 
     def _transcribe_input_manifest_processing(
         self, audio_files: List[str], temp_dir: str, trcfg: TranscribeConfig
