@@ -138,7 +138,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
         # Setup encoder adapters (from ASRAdapterModelMixin)
         self.setup_adapters()
-        import pdb; pdb.set_trace()
+
     def setup_optim_normalization(self):
         """
         Helper method to setup normalization of certain parts of the model prior to the optimization step.
@@ -1017,7 +1017,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             hyp = process_timestamp_outputs(
                 hyp, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-        import pdb; pdb.set_trace()
+
         if trcfg.enable_chunking and len(hyp) > 1:
             merged_hypotheses = merge_parallel_chunks(
                 hypotheses=hyp,
@@ -1027,7 +1027,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 decoding=self.decoding,
-                is_rnnt=True,
                 timestamps_type=self.final_timestamps_type
             )
             # Inject the id of the cut to hypothesis to later be used for separate batches

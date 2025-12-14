@@ -1019,29 +1019,28 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 f"`len(offsets)`: {len(char_offsets)} and `len(processed_tokens)`:"
                 f" {len(y_sequence_blank_removed)}"
             )
-
         encoded_char_offsets = copy.deepcopy(char_offsets)
 
         # Correctly process the token ids to chars/subwords.
         for i, offsets in enumerate(char_offsets):
             chars_text = []
             chars_tokens = []
+            char_token_id = []
             for char in offsets['char']:
                 # NB: if blank tokens are present, _refine_timestamps will not work properly
                 # as offests and encoded_offsets will not be 1:1 match
                 assert char != self.blank_id, "Offsets should not contain blank tokens"
+                
                 chars_tokens.append(self.decode_ids_to_tokens([int(char)])[0])
                 chars_text.append(self.decode_ids_to_str([int(char)]))
-                chars_tokens_id = int(char)
+                char_token_id.append(int(char))
             char_offsets[i]["char"] = chars_text
-            encoded_char_offsets[i]["char"] = chars_tokens
-            #Providing this to get word offsets in merged hypotheses after chunking
+            # Providing this to get word offsets in merged hypotheses after chunking
             char_offsets[i]["token_id"] = chars_tokens_id
 
         encoded_char_offsets, char_offsets = self._refine_timestamps(
             encoded_char_offsets, char_offsets, self.supported_punctuation
         )
-
         # detect char vs subword models
         lens = []
         for v in char_offsets:
@@ -1054,7 +1053,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             # but this is violated for subword models.
             max_len = max(len(c) for c in tokens)
             lens.append(max_len)
-
         # retrieve word offsets from character offsets
         word_offsets = None
         if timestamp_type in ['word', 'segment', 'all']:
@@ -1075,7 +1073,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 supported_punctuation=self.supported_punctuation,
                 segment_gap_threshold=self.segment_gap_threshold,
             )
-
         # attach results
         if len(hypothesis.timestamp) > 0:
             timestep_info = hypothesis.timestamp
@@ -1118,7 +1115,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         """
         if isinstance(hypothesis.timestamp, torch.Tensor):
             hypothesis.timestamp = hypothesis.timestamp.cpu().tolist()
-
         # Merge the results per token into a list of dictionaries
         offsets = [
             {"char": [t], "start_offset": s, "end_offset": s + 1}
@@ -1150,7 +1146,6 @@ class AbstractRNNTDecoding(ConfidenceMixin):
 
         if isinstance(hypothesis.timestamp, torch.Tensor):
             hypothesis.timestamp = hypothesis.timestamp.cpu().tolist()
-
         # Merge the results per token into a list of dictionaries
         offsets = [
             {"char": [t], "start_offset": s, "end_offset": s + d}

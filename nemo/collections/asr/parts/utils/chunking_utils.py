@@ -150,9 +150,16 @@ def chunk_audio_sample(
     )
     return stacked_chunks, stacked_lengths
 
-
 def merge_parallel_chunks(
-    hypotheses, encoded_len, model, timestamps, subsampling_factor, window_stride, decoding, is_rnnt=False, timestamps_type=None,
+    hypotheses,
+    encoded_len,
+    model,
+    timestamps,
+    subsampling_factor,
+    window_stride,
+    decoding,
+    timestamps_type=None,
+    tokenizer=None,
 ):
     """
     Merges hypotheses from parallel chunks into a single hypothesis with proper text,
@@ -166,6 +173,8 @@ def merge_parallel_chunks(
         subsampling_factor: The encoder's subsampling factor
         window_stride: The preprocessor's window stride
         decoding: The decoding instance for converting tokens to text
+        tokenizer: Optional tokenizer to use when normalizing timestamp entries.
+            Defaults to ``model.tokenizer`` when not provided.
 
     Returns:
         Hypothesis: A single merged hypothesis with combined text, tokens, and timestamps
@@ -173,10 +182,33 @@ def merge_parallel_chunks(
     # we take the overlap to be 1 second, and count number of tokens in it
     delay = int(1 / (subsampling_factor / 100))
     # Merge tokens from character level timestamps if timestamps are enabled.
+    tokenizer = tokenizer or getattr(model, 'tokenizer', None)
+
     if timestamps:
+        if tokenizer is None:
+            raise ValueError("Tokenizer is required when timestamps are enabled.")
+
+        # Function to normalize tokens from TDT/RNNT
+        def ensure_char_token(entry):
+            char_value = entry.get('char', '')
+            if isinstance(char_value, List):
+                char_value = char_value[0] if char_value else ''
+                entry['char'] = char_value
+
+            token_id = entry.get('token_id')
+            if isinstance(token_id, (list, tuple)):
+                entry['token_id'] = token_id[0] 
+
+            if 'token' not in entry or entry['token'] is None:
+                token = tokenizer.ids_to_tokens(token_id)
+                entry['token'] = token[1] if len(token) > 1 else token[0]
+            return entry
 
         if hypotheses[0].timestamp['char']:
-            merged_tokens = [char['token_id'] for char in hypotheses[0].timestamp['char']]
+            merged_tokens = []
+            for char in hypotheses[0].timestamp['char']:
+                char = ensure_char_token(char)
+                merged_tokens.append(char['token_id'])
         else:
             # Too much hallucination in the model.
             raise Warning("Can not provide reliable timestamps for the current audio file.")
@@ -187,7 +219,10 @@ def merge_parallel_chunks(
     for i in range(1, len(hypotheses)):
         if timestamps:
             if hypotheses[i].timestamp['char']:
-                data = [char['token_id'] for char in hypotheses[i].timestamp['char']]
+                data=[]
+                for char in hypotheses[i].timestamp['char']:
+                    char = ensure_char_token(char)
+                    data.append(char['token_id'])
             else:
                 raise Warning("Can not provide reliable timestamps for the current audio file.")
         else:
@@ -226,7 +261,7 @@ def merge_parallel_chunks(
             window_stride,
             decoding,
             merged_tokens,
-            timestamps_type
+            timestamps_type,
         )
     return merged_hypotheses
 
@@ -245,7 +280,6 @@ def update_timestamps(hypotheses, decoding, timestamps_type=None):
     """
     # Create encoded_char_offsets for word/segment generation
     char_timestamps = hypotheses.timestamp['char']
-
     encoded_char_offsets = []
     for char_offset in char_timestamps:
         enc_char_offset = char_offset.copy()
@@ -343,6 +377,7 @@ def join_timestamp_and_add_word_and_segment_level_timestamps(
     # First, combine char-level timestamps from all chunks
     char_timestamps = join_char_level_timestamps(
         hypotheses, chunk_offsets, subsampling_factor, window_stride, merged_tokens
+
     ) 
     merged_hypotheses.timestamp['char'] = char_timestamps
     
@@ -389,8 +424,9 @@ def join_char_level_timestamps(
         for char in h.timestamp['char']:
             if not char:
                 continue
+            current_token_id = char['token_id']
             keep = merged_tokens is None or (
-                j_token < len(merged_tokens) and char['token_id'] == merged_tokens[j_token]
+                j_token < len(merged_tokens) and current_token_id == merged_tokens[j_token]
             )
             if not keep:
                 continue
@@ -408,7 +444,7 @@ def join_char_level_timestamps(
             # convert to seconds
             upd['start'] = -1 if upd['start_offset'] == -1 else upd['start_offset'] * stride * subsamp
             upd['end'] = -1 if upd['end_offset'] == -1 else upd['end_offset'] * stride * subsamp
-
+            
             char_timestamps.append(upd)
             j_token += 1
 
