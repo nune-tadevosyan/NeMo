@@ -477,7 +477,7 @@ class TestEncDecRNNTBPEModel:
         _install_transcribe_stub(monkeypatch, captured, hyp_id='override-cut-0')
         _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-override'])
 
-        override_cfg = TranscribeConfig(batch_size=1, enable_chunking=True)
+        override_cfg = TranscribeConfig(batch_size=1)
         outputs = asr_model.transcribe(['clip.wav', 'clip2.wav'], batch_size=4, override_config=override_cfg)
 
         assert captured['enable_chunking'] is True
