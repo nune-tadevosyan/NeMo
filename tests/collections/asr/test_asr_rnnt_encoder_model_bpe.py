@@ -383,10 +383,9 @@ class TestEncDecRNNTBPEModel:
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit
-    def test_transcribe_parallel_chunking_long_audio(self, parakeet_tdt_v2):
-        model = asr_model
+    def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_transducer_model):
+        model = fast_conformer_transducer_model
         model.eval()
-        import pdb; pdb.set_trace()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
         assert len(hypotheses) == 1
