@@ -150,7 +150,7 @@ class TranscriptionConfig:
     # Set `cuda` to int to define CUDA device. If 'None', will look for CUDA
     # device anyway, and do inference on CPU only if CUDA device is not found.
     # If `cuda` is a negative number, inference will be on CPU only.
-    cuda: Optional[bool] = None
+    cuda: Optional[int] = None
     allow_mps: bool = False  # allow to select MPS device (Apple Silicon M-series GPU)
     amp: bool = False
     amp_dtype: str = "float16"  # can be set to "float16" or "bfloat16" when using amp
@@ -262,7 +262,6 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
         device = [cfg.cuda]
         accelerator = 'gpu'
         map_location = torch.device(f'cuda:{cfg.cuda}')
-    map_location = torch.device(f'cuda:1')
 
     logging.info(f"Inference will be done on device: {map_location}")
 
