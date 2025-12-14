@@ -273,7 +273,9 @@ def merge_parallel_chunks(
     # Merge tokens from character level timestamps if timestamps are enabled.
     tokenizer = tokenizer or getattr(model, 'tokenizer', None)
 
-    if timestamps:
+    timestamps_requested = bool(timestamps)
+
+    if timestamps_requested:
         if tokenizer is None:
             raise ValueError("Tokenizer is required when timestamps are enabled.")
 
@@ -299,21 +301,29 @@ def merge_parallel_chunks(
                 char = ensure_char_token(char)
                 merged_tokens.append(char['token_id'])
         else:
-            # Too much hallucination in the model.
-            raise Warning("Can not provide reliable timestamps for the current audio file.")
+            if hypotheses[0].text != '' :
+                logging.warning(
+                    "Cannot provide reliable timestamps for the current audio file."
+                )
+            merged_tokens = hypotheses[0].y_sequence.tolist()
     else:
         merged_tokens = hypotheses[0].y_sequence.tolist()
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
     for i in range(1, len(hypotheses)):
-        if timestamps:
+        if timestamps_requested:
+            
             if hypotheses[i].timestamp['char']:
                 data=[]
                 for char in hypotheses[i].timestamp['char']:
                     char = ensure_char_token(char)
                     data.append(char['token_id'])
             else:
-                raise Warning("Can not provide reliable timestamps for the current audio file.")
+                if hypotheses[0].text != '' :
+                    logging.warning(
+                        "Cannot provide reliable timestamps for the current audio file."
+                    )
+                data = hypotheses[i].y_sequence.tolist()
         else:
             data = hypotheses[i].y_sequence.tolist()
         merged_tokens = lcs_alignment_merge_buffer(
@@ -332,12 +342,12 @@ def merge_parallel_chunks(
     merged_hypotheses = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
-        timestamp=([] if not timestamps else {'word': [], 'segment': []}),
+        timestamp=([] if not timestamps_requested else {'word': [], 'segment': []}),
     )
     merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
     merged_hypotheses.text = final_text
     # Merge timestamps and add word and segment level timestamps
-    if timestamps:
+    if timestamps_requested:
         chunk_offsets = [0] + [
             (x * subsampling_factor - 100) if i >= 1 else (x * subsampling_factor)
             for i, x in enumerate(encoded_len.tolist(), start=1)
@@ -352,6 +362,7 @@ def merge_parallel_chunks(
             merged_tokens,
             timestamps_type,
         )
+
     return merged_hypotheses
 
 

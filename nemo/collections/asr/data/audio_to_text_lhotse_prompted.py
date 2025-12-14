@@ -109,6 +109,8 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
 
         # Will work if batch_size is set to 1.
         if self.enable_chunking:
+            # Avoid circular imports
+            from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
             audio, audio_lens = chunk_audio_sample(audio=audio, audio_lens=audio_lens)
             # Adding this to allow gathering results of the same audio from different batches
             if cuts[0].start != 0:
