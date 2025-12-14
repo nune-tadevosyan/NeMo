@@ -315,9 +315,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             )
             if not enable_chunking:
                 logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
-        # elif enable_chunking:
-        #     enable_chunking=False
-        #     logging.warning("Chunking currently is not supported for RNNT models.")
+
         if override_config is not None:
             override_config.enable_chunking = enable_chunking
                 
@@ -341,6 +339,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             self.change_decoding_strategy(self.cfg.decoding, verbose=False)
 
         if enable_chunking and timestamps is not None and self.cfg.decoding.rnnt_timestamp_type != 'char':
+            # Adding this to support all possible timestamps types after chunking
             self.final_timestamps_type = self.cfg.decoding.rnnt_timestamp_type
             self.cfg.decoding.rnnt_timestamp_type = 'char'
         else: 
