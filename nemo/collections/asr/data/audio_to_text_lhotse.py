@@ -35,7 +35,7 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
     by Lhotse samplers instead.
     Chunking:
     If `enable_chunking` is True, each audio sample is split into optimally sized chunks
-    (see `chunk_audio_samples`). This is useful for long audio inputs,
+    (see `chunk_audio_sample`). This is useful for long audio inputs,
     allowing the model to process them in manageable segments. Note that when chunking is enabled,
     the same transcript tokens are replicated for each audio chunk.
     """
