@@ -52,7 +52,7 @@ class InternalTranscribeConfig:
     # Scratch space
     temp_dir: Optional[str] = None
     manifest_filepath: Optional[str] = None
-
+    
 
 @dataclass
 class TranscribeConfig:
@@ -66,7 +66,7 @@ class TranscribeConfig:
     verbose: bool = True
     # Utility
     partial_hypothesis: Optional[List[Any]] = None
-
+    enable_chunking: Optional[bool] = False
     _internal: Optional[InternalTranscribeConfig] = None
 
 
