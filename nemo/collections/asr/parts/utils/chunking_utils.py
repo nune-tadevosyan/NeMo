@@ -12,12 +12,102 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import get_segment_offsets, get_words_offsets
+from nemo.utils import logging
+
+
+def should_enable_chunking(
+    audio: Union[str, List[str], np.ndarray, torch.Tensor, DataLoader],
+    *,
+    enable_chunking: bool,
+    batch_size: int,
+    override_batch_size: Optional[int] = None,
+    allow_tensor_input: bool = False,
+    tensor_input_warning: str = "Chunking is not supported when providing tensors directly to `transcribe`. Disabling chunking.",
+    dependency_available: bool = True,
+    dependency_warning: Optional[str] = None,
+    disabled_warning: Optional[str] = "Chunking is disabled. Please pass a single audio file or set batch_size to 1",
+    manifest_extensions: Tuple[str, ...] = ("json", "jsonl"),
+) -> bool:
+    """
+    Determine whether chunking should be enabled for a transcription request.
+
+    Args:
+        audio: Original audio input passed to ``transcribe``.
+        enable_chunking: Initial user request to enable chunking.
+        batch_size: Batch size argument passed to ``transcribe``.
+        override_batch_size: Optional batch size taken from override config that supersedes ``batch_size``.
+        allow_tensor_input: Whether tensor or dataloader inputs are compatible with chunking.
+        tensor_input_warning: Warning message emitted when tensor inputs disable chunking.
+        dependency_available: Whether required dependencies for chunking are available (e.g., timestamps model).
+        dependency_warning: Optional warning message when dependencies are missing.
+        disabled_warning: Warning emitted when chunking requirements are not satisfied.
+        manifest_extensions: Extensions treated as manifest files.
+
+    Returns:
+        bool: True if chunking should be enabled, False otherwise.
+    """
+    if not enable_chunking:
+        return False
+
+    if not allow_tensor_input and _is_tensor_like(audio):
+        if tensor_input_warning:
+            logging.warning(tensor_input_warning)
+        return False
+
+    if not dependency_available:
+        if dependency_warning:
+            logging.warning(dependency_warning)
+        return False
+
+    is_one_audio = _is_single_audio_input(audio, manifest_extensions)
+    effective_batch_size = override_batch_size if override_batch_size is not None else batch_size
+    chunking_enabled = is_one_audio or effective_batch_size == 1
+
+    if not chunking_enabled and disabled_warning:
+        logging.warning(disabled_warning)
+
+    return chunking_enabled
+
+
+def _is_tensor_like(audio: Union[np.ndarray, torch.Tensor, DataLoader, Iterable]) -> bool:
+    if isinstance(audio, (np.ndarray, torch.Tensor, DataLoader)):
+        return True
+
+    if isinstance(audio, (list, tuple)) and audio:
+        return isinstance(audio[0], (np.ndarray, torch.Tensor))
+
+    return False
+
+
+def _is_single_audio_input(audio: Union[str, List[str], Tuple[str, ...]], manifest_extensions: Tuple[str, ...]) -> bool:
+    if isinstance(audio, str):
+        if audio.endswith(manifest_extensions):
+            try:
+                with open(audio, "r", encoding="utf-8") as manifest_f:
+                    non_empty = 0
+                    for line in manifest_f:
+                        if line.strip():
+                            non_empty += 1
+                            if non_empty > 1:
+                                break
+                    return non_empty == 1
+            except OSError as e:
+                logging.warning(f"Failed to inspect manifest '{audio}' for chunking: {e}")
+                return False
+        return True
+
+    if isinstance(audio, (list, tuple)):
+        return len(audio) == 1
+
+    return False
 
 
 def find_optimal_chunk_size(

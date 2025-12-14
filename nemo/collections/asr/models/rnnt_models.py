@@ -43,6 +43,7 @@ from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_
 from nemo.collections.asr.parts.utils.chunking_utils import (
     merge_all_hypotheses,
     merge_parallel_chunks,
+    should_enable_chunking,
     update_timestamps,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
@@ -294,31 +295,14 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             * A list of greedy transcript texts / Hypothesis
             * An optional list of beam search transcript texts / Hypothesis / NBestHypothesis.
         """
-        if enable_chunking:
-            # Check if only one audio is provided with string
-            is_manifest = isinstance(audio, str) and audio.endswith(("json", "jsonl"))
-            if is_manifest:
-                try:
-                    with open(audio, "r", encoding="utf-8") as manifest_f:
-                        non_empty = 0
-                        for line in manifest_f:
-                            if line.strip():
-                                non_empty += 1
-                                if non_empty > 1:
-                                    break
-                        is_one_audio = non_empty == 1
-                except OSError as e:
-                    logging.warning(f"Failed to inspect manifest '{audio}' for chunking: {e}")
-                    is_one_audio = False
-            else:
-                is_one_audio = isinstance(audio, str) or (isinstance(audio, list) and len(audio) == 1)
-            # Check if chunking will be enabled
-            enable_chunking = (
-                is_one_audio
-                or (override_config.batch_size == 1 if override_config is not None else batch_size == 1)
-            )
-            if not enable_chunking:
-                logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
+        override_batch_size = getattr(override_config, 'batch_size', None) if override_config is not None else None
+        enable_chunking = should_enable_chunking(
+            audio=audio,
+            enable_chunking=enable_chunking,
+            batch_size=batch_size,
+            override_batch_size=override_batch_size,
+            disabled_warning="Chunking is disabled. Please pass a single audio file or set batch_size to 1",
+        )
 
         if override_config is not None:
             override_config.enable_chunking = enable_chunking
@@ -347,8 +331,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             self.cfg.decoding.rnnt_timestamp_type = 'char'
         else: 
             self.final_timestamps_type = None
-      
-        
         results = super().transcribe(
             audio=audio,
             use_lhotse=use_lhotse,
@@ -364,7 +346,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             partial_hypothesis=partial_hypothesis,
             enable_chunking=enable_chunking,
         )
-        
         if enable_chunking:
             results = merge_all_hypotheses(
                 hypotheses_list=results,
@@ -1005,7 +986,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
     ) -> Union[List['Hypothesis'], List[List['Hypothesis']]]:
         encoded = outputs.pop('encoded')
         encoded_len = outputs.pop('encoded_len')
-    
         hyp = self.decoding.rnnt_decoder_predictions_tensor(
             encoded,
             encoded_len,
@@ -1033,14 +1013,15 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', outputs.pop('cuts')[0].id)
             return [merged_hypotheses]
-
+        
         elif trcfg.enable_chunking:
             single_hypothesis = hyp[0]
             if trcfg.timestamps:
                 single_hypothesis = update_timestamps(
                     single_hypothesis, self.decoding, self.final_timestamps_type
                 )
-            setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
+            if outputs.get('cuts', None):
+                setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
             return [single_hypothesis]
         else:
             return hyp
@@ -1090,7 +1071,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
         if config.get("augmentor"):
             dl_config['augmentor'] = config.get("augmentor")
-
         temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config))
         return temporary_datalayer
 

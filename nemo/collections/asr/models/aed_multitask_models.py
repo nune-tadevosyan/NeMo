@@ -40,7 +40,11 @@ from nemo.collections.asr.parts.mixins.transcription import (
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDecoding, MultiTaskDecodingConfig
 from nemo.collections.asr.parts.submodules.token_classifier import TokenClassifier
-from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses, merge_parallel_chunks
+from nemo.collections.asr.parts.utils.chunking_utils import (
+    merge_all_hypotheses,
+    merge_parallel_chunks,
+    should_enable_chunking,
+)
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import (
     get_forced_aligned_timestamps_with_external_model,
@@ -568,29 +572,15 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             trcfg = override_config
             trcfg.timestamps = timestamps
 
-        if trcfg.enable_chunking:
-            
-            # Check if only one audio is provided with string
-            is_manifest = isinstance(audio, str) and audio.endswith(("json", "jsonl"))
-            if is_manifest:
-                try:
-                    with open(audio, "r", encoding="utf-8") as manifest_f:
-                        non_empty = 0
-                        for line in manifest_f:
-                            if line.strip():
-                                non_empty += 1
-                                if non_empty > 1:
-                                    break
-                        is_one_audio = non_empty == 1
-                except OSError as e:
-                    logging.warning(f"Failed to inspect manifest '{audio}' for chunking: {e}")
-                    is_one_audio = False
-            else:
-                is_one_audio = isinstance(audio, str) or (isinstance(audio, list) and len(audio) == 1)
-            # Check if chunking will be enabled
-            trcfg.enable_chunking = (is_one_audio or trcfg.batch_size == 1) and self.timestamps_asr_model is not None
-            if not trcfg.enable_chunking:
-                logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
+        trcfg.enable_chunking = should_enable_chunking(
+            audio=audio,
+            enable_chunking=trcfg.enable_chunking,
+            batch_size=trcfg.batch_size,
+            override_batch_size=None,
+            disabled_warning="Chunking is disabled. Please pass a single audio file or set batch_size to 1",
+            dependency_available=self.timestamps_asr_model is not None,
+            dependency_warning="Chunking requires an available timestamps ASR model. Disabling chunking.",
+        )
 
         results = super().transcribe(audio=audio, override_config=trcfg)
 
@@ -1090,7 +1080,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             return [merged_hypotheses]
 
         if trcfg.enable_chunking and len(hypotheses) == 1:
-            setattr(hypotheses[0], 'id', batch.cuts[0].id)
+            if outputs.get('cuts', None):
+                setattr(hypotheses[0], 'id', batch.cuts[0].id)
         return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
