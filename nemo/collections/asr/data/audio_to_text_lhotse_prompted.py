@@ -21,7 +21,6 @@ from lhotse.cut import MixedCut
 from lhotse.dataset import AudioSamples
 from lhotse.dataset.collation import collate_vectors
 
-from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
 from nemo.collections.common.data import apply_prompt_format_fn
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import TokenizerSpec
@@ -109,6 +108,8 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
 
         # Will work if batch_size is set to 1.
         if self.enable_chunking:
+            # Avoid circular imports
+            from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
             audio, audio_lens = chunk_audio_sample(audio=audio, audio_lens=audio_lens)
             # Adding this to allow gathering results of the same audio from different batches
             if cuts[0].start != 0:

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, List, Optional, Tuple, Union
-
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+from typing import Iterable, List, Optional, Tuple, Union
 
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import get_segment_offsets, get_words_offsets
@@ -87,9 +87,7 @@ def _is_tensor_like(audio: Union[np.ndarray, torch.Tensor, DataLoader, Iterable]
     return False
 
 
-def _is_single_audio_input(
-    audio: Union[str, List[str], Tuple[str, ...]], manifest_extensions: Tuple[str, ...]
-) -> bool:
+def _is_single_audio_input(audio: Union[str, List[str], Tuple[str, ...]], manifest_extensions: Tuple[str, ...]) -> bool:
     if isinstance(audio, str):
         if audio.endswith(manifest_extensions):
             try:
@@ -171,6 +169,7 @@ def chunk_waveform(
             max_sec=chunk_range[1],
             sample_rate=sample_rate,
             overlap_sec=overlap_sec,
+
         )
 
     if chunk_size >= total_len:
@@ -235,9 +234,10 @@ def chunk_audio_sample(
         return audio, audio_lens
 
     stacked_chunks = torch.stack(sample_chunks, dim=0)
-    stacked_lengths = torch.as_tensor(sample_lengths, dtype=audio_lens.dtype, device=audio_lens.device)
+    stacked_lengths = torch.as_tensor(
+        sample_lengths, dtype=audio_lens.dtype, device=audio_lens.device
+    )
     return stacked_chunks, stacked_lengths
-
 
 def merge_parallel_chunks(
     hypotheses,
@@ -273,7 +273,9 @@ def merge_parallel_chunks(
     # Merge tokens from character level timestamps if timestamps are enabled.
     tokenizer = tokenizer or getattr(model, 'tokenizer', None)
 
-    if timestamps:
+    timestamps_requested = bool(timestamps)
+
+    if timestamps_requested:
         if tokenizer is None:
             raise ValueError("Tokenizer is required when timestamps are enabled.")
 
@@ -286,7 +288,7 @@ def merge_parallel_chunks(
 
             token_id = entry.get('token_id')
             if isinstance(token_id, (list, tuple)):
-                entry['token_id'] = token_id[0]
+                entry['token_id'] = token_id[0] 
 
             if 'token' not in entry or entry['token'] is None:
                 token = tokenizer.ids_to_tokens(token_id)
@@ -299,22 +301,29 @@ def merge_parallel_chunks(
                 char = ensure_char_token(char)
                 merged_tokens.append(char['token_id'])
         else:
-            # Too much hallucination in the model.
-            raise Warning("Can not provide reliable timestamps for the current audio file.")
+            if hypotheses[0].text != '' :
+                logging.warning(
+                    "Cannot provide reliable timestamps for the current audio file."
+                )
+            merged_tokens = hypotheses[0].y_sequence.tolist()
     else:
         merged_tokens = hypotheses[0].y_sequence.tolist()
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
-
     for i in range(1, len(hypotheses)):
-        if timestamps:
+        if timestamps_requested:
+            
             if hypotheses[i].timestamp['char']:
-                data = []
+                data=[]
                 for char in hypotheses[i].timestamp['char']:
                     char = ensure_char_token(char)
                     data.append(char['token_id'])
             else:
-                raise Warning("Can not provide reliable timestamps for the current audio file.")
+                if hypotheses[0].text != '' :
+                    logging.warning(
+                        "Cannot provide reliable timestamps for the current audio file."
+                    )
+                data = hypotheses[i].y_sequence.tolist()
         else:
             data = hypotheses[i].y_sequence.tolist()
         merged_tokens = lcs_alignment_merge_buffer(
@@ -333,12 +342,12 @@ def merge_parallel_chunks(
     merged_hypotheses = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
-        timestamp=([] if not timestamps else {'word': [], 'segment': []}),
+        timestamp=([] if not timestamps_requested else {'word': [], 'segment': []}),
     )
     merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
     merged_hypotheses.text = final_text
     # Merge timestamps and add word and segment level timestamps
-    if timestamps:
+    if timestamps_requested:
         chunk_offsets = [0] + [
             (x * subsampling_factor - 100) if i >= 1 else (x * subsampling_factor)
             for i, x in enumerate(encoded_len.tolist(), start=1)
@@ -353,6 +362,7 @@ def merge_parallel_chunks(
             merged_tokens,
             timestamps_type,
         )
+
     return merged_hypotheses
 
 
@@ -429,9 +439,10 @@ def join_timestamp_and_add_word_and_segment_level_timestamps(
     # First, combine char-level timestamps from all chunks
     char_timestamps = join_char_level_timestamps(
         hypotheses, chunk_offsets, subsampling_factor, window_stride, merged_tokens
-    )
-    merged_hypotheses.timestamp['char'] = char_timestamps
 
+    ) 
+    merged_hypotheses.timestamp['char'] = char_timestamps
+    
     return update_timestamps(merged_hypotheses, decoding, timestamps_type)
 
 
@@ -496,7 +507,7 @@ def join_char_level_timestamps(
             # convert to seconds
             upd['start'] = -1 if upd['start_offset'] == -1 else upd['start_offset'] * stride * subsamp
             upd['end'] = -1 if upd['end_offset'] == -1 else upd['end_offset'] * stride * subsamp
-
+            
             char_timestamps.append(upd)
             j_token += 1
 
@@ -527,9 +538,7 @@ def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
     return f'{prefix}-0'
 
 
-def merge_all_hypotheses(
-    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None
-):
+def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
     """
     Group hypotheses by ID and merge each group into a single hypothesis.
 
@@ -545,7 +554,7 @@ def merge_all_hypotheses(
     same_audio_hypotheses = []
     all_merged_hypotheses = []
     prev_id = None
-
+    
     for h in hypotheses_list:
         current_id = _normalize_hypothesis_group_id(h.id)
 
@@ -607,7 +616,7 @@ def merge_hypotheses_of_same_audio(
         score=0.0,
         y_sequence=torch.tensor([]),
         timestamp=timestamp_dict,
-    )
+    )   
     merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses_list])
 
     # Create final text by joining text from all hypotheses
