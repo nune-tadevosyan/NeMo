@@ -19,7 +19,6 @@ import torch.utils.data
 from lhotse.dataset import AudioSamples
 from lhotse.dataset.collation import collate_vectors
 
-from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
 from nemo.collections.common.tokenizers.aggregate_tokenizer import TokenizerWrapper
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralType
@@ -70,6 +69,8 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
 
         base_tokens = [_tokens_from_cut(cut) for cut in cuts]
         if self.enable_chunking:
+            # Avoid circular imports
+            from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
             audio, audio_lens= chunk_audio_sample(audio=audio, audio_lens=audio_lens, chunk_range=[240, 300])
             tokens = base_tokens * len(audio)
             # This check will allow to gather the audio from different batches
