@@ -1023,7 +1023,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         for i, offsets in enumerate(char_offsets):
             chars_text = []
             chars_tokens = []
-            char_token_id = []
+            chars_token_id = []
             for char in offsets['char']:
                 # NB: if blank tokens are present, _refine_timestamps will not work properly
                 # as offests and encoded_offsets will not be 1:1 match
@@ -1031,10 +1031,11 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 
                 chars_tokens.append(self.decode_ids_to_tokens([int(char)])[0])
                 chars_text.append(self.decode_ids_to_str([int(char)]))
-                char_token_id.append(int(char))
+                chars_token_id.append(int(char))
             char_offsets[i]["char"] = chars_text
+            encoded_char_offsets[i]["char"] = chars_tokens
             # Providing this to get word offsets in merged hypotheses after chunking
-            char_offsets[i]["token_id"] = chars_tokens_id
+            char_offsets[i]["token_id"] = chars_token_id
 
         encoded_char_offsets, char_offsets = self._refine_timestamps(
             encoded_char_offsets, char_offsets, self.supported_punctuation
