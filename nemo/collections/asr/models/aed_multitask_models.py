@@ -1319,7 +1319,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             save_restore_connector.model_config_yaml = "timestamps_asr_model_config.yaml"
             save_restore_connector.model_weights_ckpt = "timestamps_asr_model_weights.ckpt"
             external_timestamps_model = ASRModel.restore_from(
-                model_restore_path, save_restore_connector=save_restore_connector,map_location=map_location
+                model_restore_path, save_restore_connector=save_restore_connector, map_location=map_location
             )
             external_timestamps_model.eval()
         except Exception as e:

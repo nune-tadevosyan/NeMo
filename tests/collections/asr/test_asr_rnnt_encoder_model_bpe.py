@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import shutil
 import tempfile
-import json
 
 import pytest
 import torch
 from lhotse import CutSet, MonoCut
 from lhotse.testing.dummies import DummyManifest
-from omegaconf import DictConfig
 from lightning.pytorch import Trainer
+from omegaconf import DictConfig
 
 import nemo.collections.asr.models.rnnt_models as rnnt_models
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
@@ -77,7 +77,9 @@ def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, rais
         if raise_error:
             raise AssertionError("Chunk merge should not be triggered when chunking is disabled.")
         if callable(return_value):
-            return return_value(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type)
+            return return_value(
+                hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type
+            )
         return return_value
 
     monkeypatch.setattr(rnnt_models, 'merge_all_hypotheses', _merge)
@@ -380,7 +382,6 @@ class TestEncDecRNNTBPEModel:
         assert isinstance(asr_model.decoding.decoding, beam_decode.BeamRNNTInfer)
         assert asr_model.decoding.decoding.search_type == "alsd"
 
-
     @pytest.mark.with_downloads()
     @pytest.mark.unit
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_transducer_model):
@@ -408,8 +409,10 @@ class TestEncDecRNNTBPEModel:
         assert all(s <= e for s, e in zip(starts, ends))
         assert all(x <= y for x, y in zip(starts, starts[1:]))
         assert all(x <= y for x, y in zip(ends, ends[1:]))
-        assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
-        
+        assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[
+            0
+        ].text.split()
+
         assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
             [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
         )
@@ -421,7 +424,8 @@ class TestEncDecRNNTBPEModel:
             == ts_hypotheses[0].timestamp['word'][0]['start_offset']
         )
         assert (
-            ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+            ts_hypotheses[0].timestamp['segment'][-1]['end_offset']
+            == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
         )
 
     @pytest.mark.unit

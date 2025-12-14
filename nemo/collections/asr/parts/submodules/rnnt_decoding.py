@@ -735,7 +735,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                     timestamp_type = self.cfg.get('rnnt_timestamp_type', 'all')
                     for hyp_idx in range(len(decoded_hyps)):
                         decoded_hyps[hyp_idx] = self.compute_rnnt_timestamps(decoded_hyps[hyp_idx], timestamp_type)
-                
+
                 hypotheses.append(decoded_hyps[0])  # best hypothesis
                 all_hypotheses.append(decoded_hyps)
 
@@ -1028,7 +1028,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 # NB: if blank tokens are present, _refine_timestamps will not work properly
                 # as offests and encoded_offsets will not be 1:1 match
                 assert char != self.blank_id, "Offsets should not contain blank tokens"
-                
+
                 chars_tokens.append(self.decode_ids_to_tokens([int(char)])[0])
                 chars_text.append(self.decode_ids_to_str([int(char)]))
                 chars_token_id.append(int(char))

@@ -256,7 +256,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
-        enable_chunking: bool = True, 
+        enable_chunking: bool = True,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -306,7 +306,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
         if override_config is not None:
             override_config.enable_chunking = enable_chunking
-                
+
         timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
         if timestamps is not None:
             if timestamps or (override_config is not None and override_config.timestamps):
@@ -329,7 +329,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             # Adding this to support all possible timestamps types after chunking
             self.final_timestamps_type = self.cfg.decoding.rnnt_timestamp_type
             self.cfg.decoding.rnnt_timestamp_type = 'char'
-        else: 
+        else:
             self.final_timestamps_type = None
         results = super().transcribe(
             audio=audio,
@@ -349,9 +349,9 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         if enable_chunking:
             results = merge_all_hypotheses(
                 hypotheses_list=results,
-                timestamps=(override_config.timestamps if override_config is not None else timestamps), 
+                timestamps=(override_config.timestamps if override_config is not None else timestamps),
                 subsampling_factor=self.encoder.subsampling_factor,
-                timestamps_type=self.final_timestamps_type
+                timestamps_type=self.final_timestamps_type,
             )
         return results
 
@@ -1008,18 +1008,16 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 decoding=self.decoding,
-                timestamps_type=self.final_timestamps_type
+                timestamps_type=self.final_timestamps_type,
             )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', outputs.pop('cuts')[0].id)
             return [merged_hypotheses]
-        
+
         elif trcfg.enable_chunking:
             single_hypothesis = hyp[0]
             if trcfg.timestamps:
-                single_hypothesis = update_timestamps(
-                    single_hypothesis, self.decoding, self.final_timestamps_type
-                )
+                single_hypothesis = update_timestamps(single_hypothesis, self.decoding, self.final_timestamps_type)
             if outputs.get('cuts', None):
                 setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
             return [single_hypothesis]

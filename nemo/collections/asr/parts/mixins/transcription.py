@@ -52,7 +52,7 @@ class InternalTranscribeConfig:
     # Scratch space
     temp_dir: Optional[str] = None
     manifest_filepath: Optional[str] = None
-    
+
 
 @dataclass
 class TranscribeConfig:

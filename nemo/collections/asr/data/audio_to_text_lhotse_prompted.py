@@ -21,10 +21,10 @@ from lhotse.cut import MixedCut
 from lhotse.dataset import AudioSamples
 from lhotse.dataset.collation import collate_vectors
 
+from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
 from nemo.collections.common.data import apply_prompt_format_fn
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import TokenizerSpec
-from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
 
 
 @dataclass
@@ -113,7 +113,7 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
             # Adding this to allow gathering results of the same audio from different batches
             if cuts[0].start != 0:
                 cuts[0].id = cuts[0].id + '_cut_segmented'
-        
+
         # Fast-path: the tokenization and prompt formatting was already done before sampling.
         attrs = ("input_ids", "context_ids", "answer_ids")
         pre_formatted = all(hasattr(c, a) for c in cuts for a in attrs)
