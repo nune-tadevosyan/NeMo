@@ -1018,8 +1018,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             single_hypothesis = hyp[0]
             if trcfg.timestamps:
                 single_hypothesis = update_timestamps(single_hypothesis, self.decoding, self.final_timestamps_type)
-            if outputs.get('cuts', None):
-                setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
+            setattr(single_hypothesis, 'id', outputs.pop('cuts')[0].id)
             return [single_hypothesis]
         else:
             return hyp

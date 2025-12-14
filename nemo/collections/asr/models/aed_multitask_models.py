@@ -1078,10 +1078,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # Inject the id of the cut to hypothese to later be used for separate batches
             setattr(merged_hypotheses, 'id', batch.cuts[0].id)
             return [merged_hypotheses]
-
         if trcfg.enable_chunking and len(hypotheses) == 1:
-            if outputs.get('cuts', None):
-                setattr(hypotheses[0], 'id', batch.cuts[0].id)
+            setattr(hypotheses[0], 'id', batch.cuts[0].id)
         return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
