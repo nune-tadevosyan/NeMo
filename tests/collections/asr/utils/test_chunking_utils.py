@@ -16,6 +16,9 @@ import pytest
 import torch
 
 from nemo.collections.asr.parts.utils.chunking_utils import (
+    chunk_audio_sample,
+    chunk_waveform,
+    find_optimal_chunk_size,
     join_char_level_timestamps,
     merge_all_hypotheses,
     merge_hypotheses_of_same_audio,
@@ -31,6 +34,104 @@ def _make_char(char, token_id, start_off, end_off, token=None):
         "start_offset": start_off,
         "end_offset": end_off,
     }
+
+
+@pytest.mark.unit
+def test_find_optimal_chunk_size_returns_total_for_short_audio():
+    total_len = 95
+    chunk_size = find_optimal_chunk_size(
+        total_len=total_len,
+        min_sec=3,
+        max_sec=10,
+        sample_rate=10,
+        overlap_sec=1.0,
+    )
+
+    assert chunk_size == total_len
+
+
+@pytest.mark.unit
+def test_find_optimal_chunk_size_prefers_largest_last_chunk():
+    total_len = 105
+    chunk_size = find_optimal_chunk_size(
+        total_len=total_len,
+        min_sec=3,
+        max_sec=5,
+        sample_rate=10,
+        overlap_sec=1.0,
+    )
+
+    assert chunk_size == 50  # 5 seconds * 10 Hz sample rate
+
+
+@pytest.mark.unit
+def test_chunk_waveform_produces_overlapping_padded_chunks():
+    waveform = torch.arange(100, dtype=torch.float32)
+
+    chunks, chunk_lens = chunk_waveform(
+        waveform=waveform,
+        chunk_range=[3, 3],
+        overlap_sec=1.0,
+        sample_rate=10,
+    )
+
+    assert len(chunks) == 5
+    assert chunk_lens == [30, 30, 30, 30, 20]
+    assert all(chunk.shape[0] == 30 for chunk in chunks)
+    assert torch.allclose(chunks[0], waveform[:30])
+
+    padded_tail = chunks[-1][chunk_lens[-1] :]
+    assert torch.allclose(padded_tail, torch.zeros_like(padded_tail))
+
+
+@pytest.mark.unit
+def test_chunk_waveform_requires_valid_range():
+    waveform = torch.zeros(32)
+    with pytest.raises((ValueError, TypeError)):
+        chunk_waveform(waveform=waveform, chunk_range=42, sample_rate=10)
+    with pytest.raises((ValueError, TypeError)):
+        chunk_waveform(waveform=waveform, chunk_range=[1], sample_rate=10)
+
+
+@pytest.mark.unit
+def test_chunk_waveform_raises_when_overlap_not_smaller_than_chunk():
+    waveform = torch.arange(25, dtype=torch.float32)
+    with pytest.raises(ValueError):
+        chunk_waveform(
+            waveform=waveform,
+            chunk_range=[1, 1],
+            overlap_sec=1.5,
+            sample_rate=10,
+        )
+
+
+@pytest.mark.unit
+def test_chunk_audio_sample_chunks_and_tracks_lengths():
+    audio = torch.arange(100, dtype=torch.float32).unsqueeze(0)
+    audio_lens = torch.tensor([100], dtype=torch.long)
+
+    chunked_audio, chunked_lens = chunk_audio_sample(
+        audio=audio,
+        audio_lens=audio_lens,
+        chunk_range=[3, 3],
+        overlap_sec=1.0,
+        sample_rate=10,
+    )
+
+    assert chunked_audio.shape == (5, 30)
+    assert torch.equal(chunked_lens, torch.tensor([30, 30, 30, 30, 20], dtype=torch.long))
+    assert torch.allclose(chunked_audio[0], audio[0, :30])
+
+
+@pytest.mark.unit
+def test_chunk_audio_sample_validates_inputs():
+    audio = torch.arange(10, dtype=torch.float32)
+    with pytest.raises(ValueError):
+        chunk_audio_sample(audio=audio, audio_lens=torch.tensor([10]))
+
+    audio = torch.zeros((2, 20))
+    with pytest.raises(ValueError):
+        chunk_audio_sample(audio=audio, audio_lens=torch.tensor([20, 20]))
 
 
 @pytest.mark.unit
