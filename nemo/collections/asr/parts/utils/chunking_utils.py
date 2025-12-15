@@ -366,7 +366,7 @@ def merge_parallel_chunks(
     return merged_hypotheses
 
 
-def update_timestamps(hypotheses, decoding, timestamps_type=None):
+def update_timestamps(hypotheses, decoding, tokenizer=None, timestamps_type=None):
     """
     Generate word and segment timestamps from character timestamps.
 
@@ -383,17 +383,18 @@ def update_timestamps(hypotheses, decoding, timestamps_type=None):
     encoded_char_offsets = []
     for char_offset in char_timestamps:
         enc_char_offset = char_offset.copy()
-        enc_char_offset['char'] = enc_char_offset.get('token')
+        token = enc_char_offset.get('token', None)
+        enc_char_offset['char'] = token if token is not None else tokenizer.ids_to_tokens(enc_char_offset['token_id'])
         encoded_char_offsets.append(enc_char_offset)
 
     # Generate word-level timestamps from combined char timestamps
+    
     word_offsets = get_words_offsets(
         char_offsets=char_timestamps,
         decode_tokens_to_str=decoding.decode_tokens_to_str,
         encoded_char_offsets=encoded_char_offsets,
         supported_punctuation={',', '.', '!', '?'},
     )
-
     # Generate segment-level timestamps from word timestamps
     segment_offsets = get_segment_offsets(word_offsets=word_offsets, segment_delimiter_tokens={'.', '!', '?', "..."})
     # Update the merged hypothesis with word and segment timestamps
@@ -554,7 +555,6 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     same_audio_hypotheses = []
     all_merged_hypotheses = []
     prev_id = None
-    
     for h in hypotheses_list:
         current_id = _normalize_hypothesis_group_id(h.id)
 
