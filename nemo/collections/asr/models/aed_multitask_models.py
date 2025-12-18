@@ -582,6 +582,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             dependency_warning="Chunking requires an available timestamps ASR model. Disabling chunking.",
         )
 
+        if not trcfg.enable_chunking:
+            logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
+
         results = super().transcribe(audio=audio, override_config=trcfg)
 
         if trcfg.enable_chunking:

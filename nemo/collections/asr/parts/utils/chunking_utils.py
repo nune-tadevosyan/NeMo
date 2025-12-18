@@ -538,8 +538,8 @@ def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
 
     return f'{prefix}-0'
 
-
 def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
+
     """
     Group hypotheses by ID and merge each group into a single hypothesis.
 
@@ -556,6 +556,8 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     all_merged_hypotheses = []
     prev_id = None
     for h in hypotheses_list:
+
+        # This will form the current ids of the same audio file
         current_id = _normalize_hypothesis_group_id(h.id)
 
         # If this is a new ID (different from previous), process the accumulated hypotheses
