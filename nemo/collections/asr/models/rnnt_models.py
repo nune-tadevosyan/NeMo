@@ -654,10 +654,10 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             "outputs": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
             "encoded_lengths": NeuralType(tuple('B'), LengthsType()),
         }
-
-    @typecheck()
+    #turning this off for now
+    #@typecheck()
     def forward(
-        self, input_signal=None, input_signal_length=None, processed_signal=None, processed_signal_length=None
+        self, input_signal=None, input_signal_length=None, processed_signal=None, processed_signal_length=None, inference_params=None
     ):
         """
         Forward pass of the model. Note that for RNNT Models, the forward pass of the model is a 3 step process,
@@ -704,8 +704,8 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         # Spec augment is not applied during evaluation/testing
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-
-        encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+    
+        encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length, inference_params=inference_params)
         return encoded, encoded_len
 
     # PTL-specific methods

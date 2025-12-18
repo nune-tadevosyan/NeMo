@@ -93,6 +93,8 @@ from nemo.collections.asr.parts.utils.transcribe_utils import (
     setup_model,
     write_transcription,
 )
+from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLayer
+from mamba_ssm.utils.generation import InferenceParams
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 
@@ -121,14 +123,13 @@ class TranscriptionConfig:
     append_pred: bool = False  # Sets mode of work, if True it will add new field transcriptions.
     pred_name_postfix: Optional[str] = None  # If you need to use another model name, rather than standard one.
     random_seed: Optional[int] = None  # seed number going to be used in seed_everything()
-
     # Chunked configs
     chunk_secs: float = 2  # Chunk length in seconds
     left_context_secs: float = (
-        10.0  # left context: larger value improves quality without affecting theoretical latency
+        1 # left context: larger value improves quality without affecting theoretical latency
     )
     right_context_secs: float = 2  # right context
-
+    
     # Set `cuda` to int to define CUDA device. If 'None', will look for CUDA
     # device anyway, and do inference on CPU only if CUDA device is not found.
     # If `cuda` is a negative number, inference will be on CPU only.
@@ -239,7 +240,10 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
             # hybrid ctc rnnt model with decoder_type = rnnt
             if hasattr(asr_model, 'cur_decoder'):
                 asr_model.change_decoding_strategy(cfg.decoding, decoder_type='rnnt')
-
+    if asr_model.encoder.use_mamba_only:
+        inference_params = InferenceParams(max_seqlen=20, max_batch_size=cfg.batch_size, seqlen_offset=5)
+    else:
+        inference_params=None
     if manifest is not None:
         records = read_manifest(manifest)
         manifest_dir = Path(manifest).parent.absolute()
@@ -305,9 +309,28 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     with torch.no_grad(), torch.inference_mode():
         all_hyps = []
         audio_data: AudioBatch
+        #import pdb; pdb.set_trace()
         for audio_data in tqdm(audio_dataloader):
             # get audio
             # NB: preprocessor runs on torch.float32, no need to cast dtype here
+            for layer in asr_model.modules():
+                    #print("layerss")
+                    # Check if the layer is an instance of ConformerLayerMamba
+                    if isinstance(layer, ConformerLayer):
+                        # Access the mamba_attention layer
+    
+                        mamba_attention = layer.mamba_attention
+    
+                        # Modify or inspect ssm_state and conv_state
+
+                        if hasattr(mamba_attention, 'ssm_state'):
+                            # Example modification
+                            mamba_attention.ssm_state = None  # Change this as needed
+    
+                        if hasattr(mamba_attention, 'conv_state'):
+                            # Example modification
+                            mamba_attention.conv_state = None  # C 
+                        mamba_attention.count=0
             audio_batch = audio_data.audio_signals.to(device=map_location)
             audio_batch_lengths = audio_data.audio_signal_lengths.to(device=map_location)
             batch_size = audio_batch.shape[0]
@@ -351,6 +374,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 encoder_output, encoder_output_len = asr_model(
                     input_signal=buffer.samples,
                     input_signal_length=buffer.context_size_batch.total(),
+                    inference_params = inference_params
                 )
                 encoder_output = encoder_output.transpose(1, 2)  # [B, T, C]
                 # remove extra context from encoder_output (leave only frames corresponding to the chunk)

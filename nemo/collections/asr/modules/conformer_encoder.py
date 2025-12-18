@@ -344,6 +344,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         self.global_attn_separate = global_attn_separate
         self.global_tokens_spacing = global_tokens_spacing
         self.use_pytorch_sdpa = use_pytorch_sdpa
+        self.use_mamba_only = use_mamba_only
         if use_pytorch_sdpa_backends is None:
             use_pytorch_sdpa_backends = []
         self.use_pytorch_sdpa_backends = use_pytorch_sdpa_backends
@@ -551,7 +552,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
         return (encoded, encoded_len, cache_last_channel_next, cache_last_time_next, cache_last_channel_next_len)
 
-    @typecheck()
+   # @typecheck() Tunring this off for now
     def forward(
         self,
         audio_signal,
@@ -560,6 +561,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        inference_params=None,
     ):
         """
         Forward function for the ConformerEncoder accepting an audio signal and its corresponding length.
@@ -594,6 +596,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             cache_last_time=cache_last_time,
             cache_last_channel_len=cache_last_channel_len,
             bypass_pre_encode=bypass_pre_encode,
+            inference_params=inference_params,
         )
 
     def forward_internal(
@@ -604,6 +607,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        inference_params=None
     ):
         """
         The `audio_signal` input supports two formats depending on the `bypass_pre_encode` boolean flag.
@@ -693,6 +697,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 pad_mask=pad_mask,
                 cache_last_channel=cache_last_channel_cur,
                 cache_last_time=cache_last_time_cur,
+                inference_params=inference_params
             )
 
             if cache_last_channel_cur is not None:

@@ -28,7 +28,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
 from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.common.parts.utils import activation_registry
 from nemo.core.classes.mixins import AccessMixin
-from mamba_n.mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.modules.mamba_simple import Mamba
 
 __all__ = ['ConformerConvolution', 'ConformerFeedForward', 'ConformerLayer']
 
@@ -83,7 +83,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         use_mamba_only=False,
         mamba_d_model=1024,
         mamba_d_state=32,
-        mamba_expand=2
+        mamba_expand=2,
     ):
         super(ConformerLayer, self).__init__()
 
@@ -108,7 +108,6 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
             conv_context_size=conv_context_size,
             use_bias=use_bias,
         )
-
         # multi-headed self-attention module
         self.norm_self_att = LayerNorm(d_model)
         MHA_max_cache_len = att_context_size[0]
@@ -164,7 +163,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         self.dropout = nn.Dropout(dropout)
         self.norm_out = LayerNorm(d_model)
 
-    def forward(self, x, att_mask=None, pos_emb=None, pad_mask=None, cache_last_channel=None, cache_last_time=None):
+    def forward(self, x, att_mask=None, pos_emb=None, pad_mask=None, cache_last_channel=None, cache_last_time=None, inference_params=None):
         """
         Args:
             x (torch.Tensor): input signals (B, T, d_model)
@@ -184,7 +183,10 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         residual = residual + self.dropout(x) * self.fc_factor
         x = self.norm_self_att(residual)
         if self.use_mamba_only:
-            x = self.mamba_attention(x)
+            if inference_params:
+                x = self.mamba_attention(x,  inference_params)
+            else:
+                x = self.mamba_attention(x)
         else:
             if self.self_attention_model == 'rel_pos':
                 x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)
