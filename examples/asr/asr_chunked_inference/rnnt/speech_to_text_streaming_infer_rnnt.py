@@ -104,6 +104,21 @@ def make_divisible_by(num, factor: int) -> int:
     return (num // factor) * factor
 
 
+def _reset_mamba_states(model) -> None:
+    """Reset cached convolution and SSM states across all Mamba-based layers."""
+    for layer in model.modules():
+        if isinstance(layer, ConformerLayer):
+            mamba_attention = getattr(layer, "mamba_attention", None)
+            if mamba_attention is None:
+                continue
+            if hasattr(mamba_attention, "ssm_state"):
+                mamba_attention.ssm_state = None
+            if hasattr(mamba_attention, "conv_state"):
+                mamba_attention.conv_state = None
+            if hasattr(mamba_attention, "count"):
+                mamba_attention.count = 0
+
+
 @dataclass
 class TranscriptionConfig:
     """
@@ -126,7 +141,7 @@ class TranscriptionConfig:
     # Chunked configs
     chunk_secs: float = 2  # Chunk length in seconds
     left_context_secs: float = (
-        1 # left context: larger value improves quality without affecting theoretical latency
+        0.0 # left context: larger value improves quality without affecting theoretical latency
     )
     right_context_secs: float = 2  # right context
     
@@ -309,28 +324,9 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     with torch.no_grad(), torch.inference_mode():
         all_hyps = []
         audio_data: AudioBatch
-        #import pdb; pdb.set_trace()
         for audio_data in tqdm(audio_dataloader):
-            # get audio
             # NB: preprocessor runs on torch.float32, no need to cast dtype here
-            for layer in asr_model.modules():
-                    #print("layerss")
-                    # Check if the layer is an instance of ConformerLayerMamba
-                    if isinstance(layer, ConformerLayer):
-                        # Access the mamba_attention layer
-    
-                        mamba_attention = layer.mamba_attention
-    
-                        # Modify or inspect ssm_state and conv_state
-
-                        if hasattr(mamba_attention, 'ssm_state'):
-                            # Example modification
-                            mamba_attention.ssm_state = None  # Change this as needed
-    
-                        if hasattr(mamba_attention, 'conv_state'):
-                            # Example modification
-                            mamba_attention.conv_state = None  # C 
-                        mamba_attention.count=0
+            _reset_mamba_states(asr_model)
             audio_batch = audio_data.audio_signals.to(device=map_location)
             audio_batch_lengths = audio_data.audio_signal_lengths.to(device=map_location)
             batch_size = audio_batch.shape[0]
@@ -377,10 +373,15 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                     inference_params = inference_params
                 )
                 encoder_output = encoder_output.transpose(1, 2)  # [B, T, C]
-                # remove extra context from encoder_output (leave only frames corresponding to the chunk)
                 encoder_context = buffer.context_size.subsample(factor=encoder_frame2audio_samples)
+                # remove extra context from encoder_output (leave only frames corresponding to the chunk)
                 encoder_context_batch = buffer.context_size_batch.subsample(factor=encoder_frame2audio_samples)
                 # remove left context
+
+
+
+
+                
                 encoder_output = encoder_output[:, encoder_context.left :]
 
                 # decode only chunk frames
