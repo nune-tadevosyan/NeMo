@@ -342,6 +342,7 @@ def merge_parallel_chunks(
         timestamp=([] if not timestamps_requested else {'word': [], 'segment': []}),
     )
     merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
+    merged_hypotheses = join_confidence_values(merged_hypotheses, hypotheses)
     merged_hypotheses.text = final_text
     # Merge timestamps and add word and segment level timestamps
     if timestamps_requested:
@@ -406,6 +407,44 @@ def update_timestamps(hypotheses, decoding, tokenizer=None, timestamps_type=None
         hypotheses.timestamp['word'] = word_offsets
         hypotheses.timestamp['segment'] = segment_offsets
     return hypotheses
+
+
+def join_confidence_values(merged_hypothesis, hypotheses):
+    """
+    Concatenate confidence values from multiple hypotheses into a single sequence.
+
+    Args:
+        merged_hypothesis: Target hypothesis to update with concatenated confidence
+        hypotheses: List of hypotheses containing confidence values
+
+    Returns:
+        Hypothesis: Updated merged_hypothesis with concatenated confidence values
+    """
+    # Merge frame_confidence
+    frame_confidences = [h.frame_confidence for h in hypotheses if h.frame_confidence is not None]
+    if frame_confidences:
+        if isinstance(frame_confidences[0], torch.Tensor):
+            merged_hypothesis.frame_confidence = torch.cat(frame_confidences)
+        elif isinstance(frame_confidences[0], list):
+            merged_hypothesis.frame_confidence = [c for conf_list in frame_confidences for c in conf_list]
+
+    # Merge token_confidence
+    token_confidences = [h.token_confidence for h in hypotheses if h.token_confidence is not None]
+    if token_confidences:
+        if isinstance(token_confidences[0], torch.Tensor):
+            merged_hypothesis.token_confidence = torch.cat(token_confidences)
+        elif isinstance(token_confidences[0], list):
+            merged_hypothesis.token_confidence = [c for conf_list in token_confidences for c in conf_list]
+
+    # Merge word_confidence
+    word_confidences = [h.word_confidence for h in hypotheses if h.word_confidence is not None]
+    if word_confidences:
+        if isinstance(word_confidences[0], torch.Tensor):
+            merged_hypothesis.word_confidence = torch.cat(word_confidences)
+        elif isinstance(word_confidences[0], list):
+            merged_hypothesis.word_confidence = [c for conf_list in word_confidences for c in conf_list]
+
+    return merged_hypothesis
 
 
 def join_timestamp_and_add_word_and_segment_level_timestamps(
@@ -618,6 +657,9 @@ def merge_hypotheses_of_same_audio(
         timestamp=timestamp_dict,
     )
     merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses_list])
+
+    # Merge confidence values from all hypotheses
+    merged_hypothesis = join_confidence_values(merged_hypothesis, hypotheses_list)
 
     # Create final text by joining text from all hypotheses
     text_parts = []
