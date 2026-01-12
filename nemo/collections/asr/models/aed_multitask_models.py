@@ -1036,10 +1036,23 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
         del enc_states, enc_mask, decoder_input_ids
 
+        # Determine the cut id to inject into hypotheses for chunking
+        if trcfg.enable_chunking or trcfg.timestamps:
+            if isinstance(batch, PromptedAudioToTextMiniBatch):
+                cut_id = batch.cuts[0].id
+                audio = batch.audio
+                audio_lens = batch.audio_lens
+                lang_id = batch.cuts[0].supervisions[0].language if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+            else:  # TensorDataset / external DataLoader tuple type batch
+                cut_id = 'audio_0'
+                audio = batch[0]
+                audio_lens = batch[1]
+                lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+
         if trcfg.timestamps and self.timestamps_asr_model is not None:
             hypotheses = get_forced_aligned_timestamps_with_external_model(
-                audio=[audio.squeeze()[:audio_len] for audio, audio_len in zip(batch.audio, batch.audio_lens)],
-                batch_size=len(batch.audio),
+                audio=[audio.squeeze()[:audio_len] for audio, audio_len in zip(audio, audio_lens)],
+                batch_size=len(audio),
                 external_ctc_model=self.timestamps_asr_model,
                 main_model_predictions=hypotheses,
                 timestamp_type='char' if merge_to_be_done else ['word', 'segment'],
@@ -1049,14 +1062,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-        # Determine the cut id to inject into hypotheses for chunking
-        if trcfg.enable_chunking:
-            if isinstance(batch, PromptedAudioToTextMiniBatch):
-                cut_id = batch.cuts[0].id
-                lang_id = batch.cuts[0].supervisions[0].language if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
-            else:
-                cut_id = 'audio_0'
-                lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+
         if merge_to_be_done:
             merged_hypotheses = merge_chunked_hypotheses(
                 hypotheses=hypotheses,
