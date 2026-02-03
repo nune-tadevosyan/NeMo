@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from re import I
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,8 +43,7 @@ from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDe
 from nemo.collections.asr.parts.submodules.token_classifier import TokenClassifier
 from nemo.collections.asr.parts.utils.chunking_utils import (
     merge_all_hypotheses,
-    merge_parallel_chunks,
-    should_enable_chunking,
+    merge_chunked_hypotheses,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import (
@@ -258,7 +258,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         self.setup_adapters()
 
         if self.cfg.get("restore_timestamps_model", True):
-            timestamps_asr_model = self.__restore_timestamps_asr_model()
+            timestamps_asr_model = self.__restore_timestamps_asr_model(map_location=self.device)
         else:
             timestamps_asr_model = None
         # Using object.__setattr__ to bypass PyTorch's module registration
@@ -503,6 +503,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
+        enable_chunking: bool = True,
         override_config: Optional[MultiTaskTranscriptionConfig] = None,
         **prompt,
     ) -> Union[List[str], List[Hypothesis]]:
@@ -541,6 +542,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             A list of transcriptions (or raw log probabilities if logprobs is True) in the same order
             as paths2audio_files
         """
+        
         if timestamps is not None:
             if self.timestamps_asr_model is None:
                 # TODO: Handle this key gracefully later
@@ -554,7 +556,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 prompt['timestamp'] = timestamps
             else:
                 prompt['timestamp'] = 'no'
-
         if override_config is None:
             trcfg = MultiTaskTranscriptionConfig(
                 batch_size=batch_size,
@@ -574,26 +575,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 )
             trcfg = override_config
             trcfg.timestamps = timestamps
-
-        trcfg.enable_chunking = should_enable_chunking(
-            audio=audio,
-            enable_chunking=trcfg.enable_chunking,
-            batch_size=trcfg.batch_size,
-            override_batch_size=None,
-            disabled_warning="Chunking is disabled. Please pass a single audio file or set batch_size to 1",
-            dependency_available=self.timestamps_asr_model is not None,
-            dependency_warning="Chunking requires an available timestamps ASR model. Disabling chunking.",
-        )
-
-        if not trcfg.enable_chunking:
-            logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1")
-
-        results = super().transcribe(audio=audio, override_config=trcfg)
-
-        if trcfg.enable_chunking:
-            results = merge_all_hypotheses(results, trcfg.timestamps, self.encoder.subsampling_factor)
-
-        return results
+        ###
+        ###  Remove this after testing
+        ##
+        trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
+        return super().transcribe(audio=audio, override_config=trcfg)
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
 
@@ -604,9 +590,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         global_rank = config.get("global_rank", self.global_rank)
         world_size = config.get("world_size", self.world_size)
         enable_chunking = config.get("enable_chunking", False)
-        # Adding a check for availability of timestamps_asr_model for differentating between Canary versions.
-        enable_chunking = enable_chunking and self.timestamps_asr_model is not None
-
         if enable_chunking:
             # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
             config.cut_into_windows_duration = 3600
@@ -618,7 +601,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             dataset=PromptedAudioToTextLhotseDataset(
                 tokenizer=self.tokenizer,
                 prompt=self.prompt,
-                enable_chunking=enable_chunking,  # <-- enables chunking
+                enable_chunking=enable_chunking, 
             ),
             tokenizer=self.tokenizer,
         )
@@ -933,11 +916,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         manifest_filepath = trcfg._internal.manifest_filepath
         audio_files = self._may_be_make_dict_and_fix_paths(audio_files, manifest_filepath, trcfg)
 
-        ds_config = super()._transcribe_input_manifest_processing(audio_files, temp_dir, trcfg)
-        if trcfg.enable_chunking and self.timestamps_asr_model is not None:
-            ds_config['enable_chunking'] = True
-        return ds_config
-
+        return super()._transcribe_input_manifest_processing(audio_files, temp_dir, trcfg)
+ 
     def _transcribe_forward(
         self, batch: PromptedAudioToTextMiniBatch | tuple[torch.Tensor, ...], trcfg: MultiTaskTranscriptionConfig
     ) -> dict:
@@ -1002,7 +982,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                         for slot, val in default_slots.items():
                             if turn["slots"].get(slot) is None:
                                 turn["slots"][slot] = val
-
             decoder_input_ids = (
                 self.prompt.encode_dialog(turns=turns)["context_ids"]
                 .unsqueeze(0)
@@ -1040,7 +1019,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         encoded_len = outputs.pop('encoded_lengths')
         enc_states = outputs.pop('encoder_states')
         enc_mask = outputs.pop('encoder_mask')
-        decoder_input_ids = outputs.pop('decoder_input_ids')
+        decoder_input_ids = outputs.pop('decoder_input_ids') 
         batch = outputs.pop('batch')
 
         del log_probs
@@ -1055,7 +1034,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             return_hypotheses=trcfg.return_hypotheses,
         )
         merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
-
         del enc_states, enc_mask, decoder_input_ids
 
         if trcfg.timestamps and self.timestamps_asr_model is not None:
@@ -1075,22 +1053,24 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         if trcfg.enable_chunking:
             if isinstance(batch, PromptedAudioToTextMiniBatch):
                 cut_id = batch.cuts[0].id
+                lang_id = batch.cuts[0].supervisions[0].language if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
             else:
                 cut_id = 'audio_0'
-
-        if merge_to_be_done and self.timestamps_asr_model is not None:
-            merged_hypotheses = merge_parallel_chunks(
+                lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+        if merge_to_be_done:
+            merged_hypotheses = merge_chunked_hypotheses(
                 hypotheses=hypotheses,
                 encoded_len=encoded_len,
-                model=self,
                 timestamps=trcfg.timestamps,
+                tokenizer=self.tokenizer,
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
-                decoding=self.decoding,
+                lang_id=lang_id
             )
             # Inject the id of the cut to hypothese to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
             return [merged_hypotheses]
+
         if trcfg.enable_chunking:
             for hyp in hypotheses:
                 setattr(hyp, 'id', cut_id)
@@ -1118,7 +1098,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             batch_size = min(config['batch_size'], len(config['paths2audio_files']))
-        enable_chunking = config.get('enable_chunking', False) and self.timestamps_asr_model is not None
+        enable_chunking = config.get('enable_chunking', False) 
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,

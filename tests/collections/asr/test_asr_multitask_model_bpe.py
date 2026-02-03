@@ -503,6 +503,7 @@ class TestEncDecMultiTaskModel:
         audio, sr = sf.read(audio_file, dtype='float32')
 
         # Numpy array test
+        import pdb; pdb.set_trace()
         outputs = asr_model.transcribe(audio, batch_size=1)
         assert len(outputs) == 1
         assert isinstance(outputs[0].text, str)
