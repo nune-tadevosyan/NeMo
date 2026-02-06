@@ -15,6 +15,8 @@
 import pytest
 import torch
 
+import json
+
 from nemo.collections.asr.parts.utils.chunking_utils import (
     chunk_audio_sample,
     chunk_waveform,
@@ -24,6 +26,7 @@ from nemo.collections.asr.parts.utils.chunking_utils import (
     merge_hypotheses_of_same_audio,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
+from nemo.collections.asr.parts.mixins.transcription import resolve_chunking
 
 
 def _make_char(char, token_id, start_off, end_off, token=None):
@@ -347,3 +350,49 @@ def test_merge_all_hypotheses_with_cut_segmented_suffix():
     assert len(merged_list) == 2
     texts = sorted(m.text for m in merged_list)
     assert texts == ["other", "root cont1 cont2"]
+
+
+@pytest.mark.unit
+def test_resolve_chunking_single_audio_enables():
+    """Test that resolve_chunking returns True for single audio file."""
+    result = resolve_chunking(audio='single.wav', enable_chunking=True, batch_size=4)
+    assert result is True
+
+
+@pytest.mark.unit
+def test_resolve_chunking_single_entry_manifest_enables(tmp_path):
+    """Test that resolve_chunking returns True for manifest with single entry."""
+    manifest_path = tmp_path / 'single_audio.jsonl'
+    manifest_path.write_text(json.dumps({'audio_filepath': 'dummy.wav', 'duration': 1.23}) + '\n')
+
+    result = resolve_chunking(audio=str(manifest_path), enable_chunking=True, batch_size=4)
+    assert result is True
+
+
+@pytest.mark.unit
+def test_resolve_chunking_batch_size_one_enables():
+    """Test that resolve_chunking returns True when batch_size=1 even with multiple inputs."""
+    result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=1)
+    assert result is True
+
+
+@pytest.mark.unit
+def test_resolve_chunking_disabled_multiple_inputs(monkeypatch):
+    """Test that resolve_chunking disables chunking for multiple inputs with batch_size > 1."""
+    from nemo.collections.asr.parts.mixins import transcription as transcription_module
+
+    warnings = []
+    monkeypatch.setattr(transcription_module.logging, 'warning', lambda message: warnings.append(message))
+
+    result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=2)
+
+    assert result is False
+    assert warnings, "Expected chunking warning for batch size > 1."
+    assert 'Chunking is disabled' in warnings[0]
+
+
+@pytest.mark.unit
+def test_resolve_chunking_respects_disabled_flag():
+    """Test that resolve_chunking returns False when enable_chunking=False."""
+    result = resolve_chunking(audio='single.wav', enable_chunking=False, batch_size=1)
+    assert result is False

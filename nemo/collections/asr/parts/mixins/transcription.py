@@ -193,25 +193,6 @@ class TranscriptionTensorDataset(Dataset):
     def __len__(self):
         return self.length
 
-    def _pad_audio(self, samples: torch.Tensor) -> torch.Tensor:
-        """Pad audio to minimum duration, matching Lhotse dataloader behavior."""
-        current_len = samples.shape[0]
-        if current_len >= self.pad_min_samples:
-            return samples
-
-        pad_total = self.pad_min_samples - current_len
-        if self.pad_direction == 'both':
-            pad_left = pad_total // 2
-            pad_right = pad_total - pad_left
-        elif self.pad_direction == 'left':
-            pad_left = pad_total
-            pad_right = 0
-        else:  # right (default)
-            pad_left = 0
-            pad_right = pad_total
-        samples = torch.nn.functional.pad(samples, (pad_left, pad_right), mode='constant', value=0.0)
-        return samples
-
     def get_item(self, index):
         samples = self.audio_tensors[index]
 
@@ -230,7 +211,7 @@ class TranscriptionTensorDataset(Dataset):
             samples = self.augmentor.perturb(segment)
             samples = torch.tensor(samples.samples, dtype=original_dtype)
 
-        samples = self._pad_audio(samples)
+        # Calculate seq length
         seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
 
         # Typically NeMo ASR models expect the mini-batch to be a 4-tuple of (audio, audio_len, text, text_len).
@@ -432,14 +413,17 @@ class TranscriptionMixin(ABC):
                     "`transcribe_cfg._internal` must be of an object of type InternalTranscribeConfig or "
                     "its subclass"
                 )
-        transcribe_cfg.enable_chunking = resolve_chunking(
-            audio=audio,
-            enable_chunking=transcribe_cfg.enable_chunking,
-            batch_size=transcribe_cfg.batch_size,
-        ) and self._is_chunking_compatible_decoding()
+        # Classification and regression models never use chunking
+        if type(transcribe_cfg).__name__ in ('ClassificationInferConfig', 'RegressionInferConfig'):
+            transcribe_cfg.enable_chunking = False
+        else:
+            transcribe_cfg.enable_chunking = resolve_chunking(
+                audio=audio,
+                enable_chunking=transcribe_cfg.enable_chunking,
+                batch_size=transcribe_cfg.batch_size,
+            ) and self._is_chunking_compatible_decoding()
         # Hold the results here
         results = None  # type: GenericTranscriptionType
-
         try:
             generator = self.transcribe_generator(audio, override_config=transcribe_cfg)
 
@@ -548,7 +532,7 @@ class TranscriptionMixin(ABC):
                     # Run forward pass
                     model_outputs = self._transcribe_forward(test_batch, transcribe_cfg)
                     processed_outputs = self._transcribe_output_processing(model_outputs, transcribe_cfg)
-
+                    
                     # clear up memory
                     del test_batch, model_outputs
 

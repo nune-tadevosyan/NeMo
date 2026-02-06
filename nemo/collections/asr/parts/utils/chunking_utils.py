@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
+from difflib import SequenceMatcher
+from typing import List, Optional, Tuple
+
 import torch
-from torch.utils.data import DataLoader
 
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -23,91 +24,107 @@ from nemo.collections.asr.parts.utils.timestamp_utils import get_segment_offsets
 from nemo.utils import logging
 
 
-def should_enable_chunking(
-    audio: Union[str, List[str], np.ndarray, torch.Tensor, DataLoader],
-    *,
-    enable_chunking: bool,
-    batch_size: int,
-    override_batch_size: Optional[int] = None,
-    allow_tensor_input: bool = False,
-    tensor_input_warning: str = "Chunking is not supported when providing tensors directly to `transcribe`. Disabling chunking.",
-    dependency_available: bool = True,
-    dependency_warning: Optional[str] = None,
-    disabled_warning: Optional[str] = "Chunking is disabled. Please pass a single audio file or set batch_size to 1",
-    manifest_extensions: Tuple[str, ...] = ("json", "jsonl"),
-) -> bool:
+class VocabularyAdapter:
     """
-    Determine whether chunking should be enabled for a transcription request.
+    Adapter that exposes tokenizer-like ids_to_tokens / ids_to_text / text_to_ids
+    for models that use a plain vocabulary (list of strings) instead of a tokenizer.
+    Used by character-based models (e.g. hybrid RNNT-CTC) in chunking utilities.
+    """
 
+    def __init__(self, vocabulary: List[str]):
+        if not vocabulary:
+            raise ValueError("vocabulary must be a non-empty list of strings")
+        self.vocabulary = list(vocabulary)
+        self._vocab_set = set(self.vocabulary)
+
+    def ids_to_tokens(self, ids, lang_id=None):
+        """Convert token id(s) to token string(s). ids can be int or list of int."""
+        if isinstance(ids, (list, tuple)):
+            id_list = ids
+        else:
+            id_list = [ids]
+        out = []
+        for i in id_list:
+            if 0 <= i < len(self.vocabulary):
+                out.append(self.vocabulary[i])
+            # skip blank or out-of-range (e.g. blank_id == len(vocabulary))
+        return out
+
+    def ids_to_text(self, ids, lang_id=None):
+        """Convert list of token ids to a single string (character-level join)."""
+        tokens = self.ids_to_tokens(ids, lang_id=lang_id)
+        return "".join(tokens)
+
+    def text_to_ids(self, text, lang_id=None):
+        """Convert text to list of token ids (character-level for plain vocabulary)."""
+        if not text:
+            return []
+        return [
+            self.vocabulary.index(c) if c in self._vocab_set else 0
+            for c in text
+        ]
+
+
+def word_similarity(word1: str, word2: str) -> float:
+    """
+    Calculate similarity ratio between two words using SequenceMatcher.
+    Returns a value between 0.0 (completely different) and 1.0 (identical).
+    """
+    if not word1 or not word2:
+        return 0.0
+    return SequenceMatcher(None, word1.lower(), word2.lower()).ratio()
+
+
+def should_concatenate_words(word1: str, word2: str, expected_word: str, similarity_threshold: float = 0.7) -> bool:
+    """
+    Determine if two words should be concatenated by checking if their combination
+    matches an expected word from the merged text.
+    
     Args:
-        audio: Original audio input passed to ``transcribe``.
-        enable_chunking: Initial user request to enable chunking.
-        batch_size: Batch size argument passed to ``transcribe``.
-        override_batch_size: Optional batch size taken from override config that supersedes ``batch_size``.
-        allow_tensor_input: Whether tensor or dataloader inputs are compatible with chunking.
-        tensor_input_warning: Warning message emitted when tensor inputs disable chunking.
-        dependency_available: Whether required dependencies for chunking are available (e.g., timestamps model).
-        dependency_warning: Optional warning message when dependencies are missing.
-        disabled_warning: Warning emitted when chunking requirements are not satisfied.
-        manifest_extensions: Extensions treated as manifest files.
-
+        word1: First word (from end of previous chunk)
+        word2: Second word (from start of next chunk)
+        expected_word: The expected word from the merged token text
+        similarity_threshold: Minimum similarity ratio to consider a match
+    
     Returns:
-        bool: True if chunking should be enabled, False otherwise.
+        True if concatenating word1+word2 produces something similar to expected_word
     """
-    if not enable_chunking:
+    if not word1 or not word2 or not expected_word:
         return False
-
-    if not allow_tensor_input and _is_tensor_like(audio):
-        if tensor_input_warning:
-            logging.warning(tensor_input_warning)
-        return False
-
-    if not dependency_available:
-        if dependency_warning:
-            logging.warning(dependency_warning)
-        return False
-
-    is_one_audio = _is_single_audio_input(audio, manifest_extensions)
-    effective_batch_size = override_batch_size if override_batch_size is not None else batch_size
-    chunking_enabled = is_one_audio or effective_batch_size == 1
-
-    if not chunking_enabled and disabled_warning:
-        logging.warning(disabled_warning)
-
-    return chunking_enabled
+    
+    combined = word1 + word2
+    similarity = word_similarity(combined, expected_word)
+    
+    return similarity >= similarity_threshold
 
 
-def _is_tensor_like(audio: Union[np.ndarray, torch.Tensor, DataLoader, Iterable]) -> bool:
-    if isinstance(audio, (np.ndarray, torch.Tensor, DataLoader)):
-        return True
-
-    if isinstance(audio, (list, tuple)) and audio:
-        return isinstance(audio[0], (np.ndarray, torch.Tensor))
-
-    return False
-
-
-def _is_single_audio_input(audio: Union[str, List[str], Tuple[str, ...]], manifest_extensions: Tuple[str, ...]) -> bool:
-    if isinstance(audio, str):
-        if audio.endswith(manifest_extensions):
-            try:
-                with open(audio, "r", encoding="utf-8") as manifest_f:
-                    non_empty = 0
-                    for line in manifest_f:
-                        if line.strip():
-                            non_empty += 1
-                            if non_empty > 1:
-                                break
-                    return non_empty == 1
-            except OSError as e:
-                logging.warning(f"Failed to inspect manifest '{audio}' for chunking: {e}")
-                return False
-        return True
-
-    if isinstance(audio, (list, tuple)):
-        return len(audio) == 1
-
-    return False
+def find_best_word_match(candidate: str, expected_words: List[str], 
+                         start_idx: int, similarity_threshold: float = 0.7) -> Tuple[int, float]:
+    """
+    Find the best matching word in expected_words starting from start_idx.
+    
+    Args:
+        candidate: The word to match
+        expected_words: List of expected words from merged text
+        start_idx: Starting index to search from
+        similarity_threshold: Minimum similarity to consider a match
+    
+    Returns:
+        Tuple of (index of best match, similarity score) or (-1, 0.0) if no match found
+    """
+    best_idx = -1
+    best_similarity = 0.0
+    
+    # Search within a reasonable window
+    search_window = min(5, len(expected_words) - start_idx)
+    
+    for i in range(start_idx, min(start_idx + search_window, len(expected_words))):
+        similarity = word_similarity(candidate, expected_words[i])
+        if similarity > best_similarity and similarity >= similarity_threshold:
+            best_similarity = similarity
+            best_idx = i
+    
+    return best_idx, best_similarity
 
 
 def find_optimal_chunk_size(
@@ -239,16 +256,17 @@ def chunk_audio_sample(
     )
     return stacked_chunks, stacked_lengths
 
-def merge_parallel_chunks(
+
+def merge_chunked_hypotheses(
     hypotheses,
     encoded_len,
-    model,
     timestamps,
-    subsampling_factor,
-    window_stride,
-    decoding,
-    timestamps_type=None,
     tokenizer=None,
+    subsampling_factor=None,
+    window_stride=None,
+    timestamps_type=None,
+    lang_id=None,
+    vocabulary=None,
 ):
     """
     Merges hypotheses from parallel chunks into a single hypothesis with proper text,
@@ -257,28 +275,25 @@ def merge_parallel_chunks(
     Args:
         hypotheses: List of Hypothesis objects from each chunk
         encoded_len: Tensor of encoded lengths for each chunk to use for finding offsets
-        model: The ASR model instance (needed for LCS alignment)
         timestamps: Timestamps generation is enabled
+        tokenizer: Optional tokenizer for id/text conversion (e.g. BPE models).
         subsampling_factor: The encoder's subsampling factor
         window_stride: The preprocessor's window stride
-        decoding: The decoding instance for converting tokens to text
-        tokenizer: Optional tokenizer to use when normalizing timestamp entries.
-            Defaults to ``model.tokenizer`` when not provided.
+        vocabulary: Optional list of token strings (e.g. character-based models without tokenizer).
+            Used when tokenizer is None to build an internal adapter.
+        timestamps_type: Types of timestamps to include.
+        lang_id: Optional language id for multilingual tokenizers.
 
     Returns:
         Hypothesis: A single merged hypothesis with combined text, tokens, and timestamps
     """
+    if tokenizer is None and vocabulary is not None:
+        tokenizer = VocabularyAdapter(vocabulary)
+    if tokenizer is None and vocabulary is None:
+        raise ValueError("Either tokenizer or vocabulary must be provided.")
     # we take the overlap to be 1 second, and count number of tokens in it
     delay = int(1 / (subsampling_factor / 100))
-    # Merge tokens from character level timestamps if timestamps are enabled.
-    tokenizer = tokenizer or getattr(model, 'tokenizer', None)
-
-    timestamps_requested = bool(timestamps)
-
-    if timestamps_requested:
-        if tokenizer is None:
-            raise ValueError("Tokenizer is required when timestamps are enabled.")
-
+    if timestamps and lang_id is None:
         # Function to normalize tokens from TDT/RNNT
         def ensure_char_token(entry):
             char_value = entry.get('char', '')
@@ -306,13 +321,14 @@ def merge_parallel_chunks(
                     "Cannot provide reliable timestamps for the current audio file."
                 )
             merged_tokens = hypotheses[0].y_sequence.tolist()
+    elif lang_id is not None:
+        merged_tokens = tokenizer.text_to_ids(hypotheses[0].text,lang_id=lang_id)
     else:
         merged_tokens = hypotheses[0].y_sequence.tolist()
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
     for i in range(1, len(hypotheses)):
-        if timestamps_requested:
-            
+        if timestamps and lang_id is None:
             if hypotheses[i].timestamp['char']:
                 data=[]
                 for char in hypotheses[i].timestamp['char']:
@@ -324,74 +340,109 @@ def merge_parallel_chunks(
                         "Cannot provide reliable timestamps for the current audio file."
                     )
                 data = hypotheses[i].y_sequence.tolist()
+        elif lang_id is not None:
+            data = tokenizer.text_to_ids(hypotheses[i].text,lang_id=lang_id)
         else:
             data = hypotheses[i].y_sequence.tolist()
         merged_tokens = lcs_alignment_merge_buffer(
             buffer=merged_tokens,
-            data=data[: int(delay * 0.6)],  # only approximately 60% of the tokens are non blank
+            data=data[: int(delay * 0.6)],  # only approximately 60% of the frames have corresponding tokens
             delay=delay,
-            model=model,
+            model=None,
             max_steps_per_timestep=2,
             min_lcs_length=1,
             parallel_chunking=True,
         )
-        merged_tokens += data[int(delay * 0.6) :]
+        merged_tokens += data[int(delay * 0.6):]
 
     # Convert merged tokens to text
-    final_text = decoding.decode_tokens_to_str(merged_tokens)
+    # Use ids_to_text which handles token ID offsets internally and works with AggregateTokenizer
+    final_text = tokenizer.ids_to_text(merged_tokens)
     merged_hypotheses = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
-        timestamp=([] if not timestamps_requested else {'word': [], 'segment': []}),
+        timestamp=([] if not timestamps else {'word': [], 'segment': []}),
     )
     merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
     merged_hypotheses.text = final_text
+    # Set score to minimum of all chunk scores, length to sum of all chunk lengths
+    merged_hypotheses.score = min(h.score for h in hypotheses)
+    merged_hypotheses.length = sum(h.length if isinstance(h.length, int) else h.length.item() for h in hypotheses)
     # Merge timestamps and add word and segment level timestamps
-    if timestamps_requested:
-        chunk_offsets = [0] + [
+    chunk_offsets = [0] + [
             (x * subsampling_factor - 100) if i >= 1 else (x * subsampling_factor)
             for i, x in enumerate(encoded_len.tolist(), start=1)
         ]
-        merged_hypotheses = join_timestamp_and_add_word_and_segment_level_timestamps(
+    if timestamps and lang_id is None:
+        
+        merged_hypotheses = join_char_timestamp_add_word_and_segment_level_timestamps(
             merged_hypotheses,
             hypotheses,
             chunk_offsets,
             subsampling_factor,
             window_stride,
-            decoding,
+            tokenizer,
             merged_tokens,
             timestamps_type,
         )
-
+    elif timestamps:
+        # lang_id is provided - timestamps are word-level, not char-level
+        merged_hypotheses = join_word_level_timestamps_add_segment_level_timestamps(
+            merged_hypotheses,
+            hypotheses,
+            chunk_offsets,
+            subsampling_factor,
+            window_stride,
+            final_text,
+            timestamps_type,
+        )
     return merged_hypotheses
 
 
-def update_timestamps(hypotheses, decoding, tokenizer=None, timestamps_type=None):
+def update_timestamps(hypotheses, tokenizer=None, timestamps_type=None, lang_id=None, vocabulary=None):
     """
     Generate word and segment timestamps from character timestamps.
     
     Args:
-        char_timestamps: Character-level timestamp data
-        merged_hypotheses: Hypothesis to update with timestamps
-        decoding: Decoding instance for token-to-string conversion
-    
+        hypotheses: Hypothesis to update with timestamps
+        tokenizer: Optional tokenizer for id/text conversion.
+        timestamps_type: Types of timestamps to include.
+        lang_id: Optional language id for multilingual tokenizers.
+        vocabulary: Optional list of token strings when tokenizer is None (e.g. character-based models).
+
     Returns:
         Hypothesis: Updated merged_hypotheses with word and segment timestamps
     """
+    if tokenizer is None and vocabulary is not None:
+        tokenizer = VocabularyAdapter(vocabulary)
+    if tokenizer is None:
+        raise ValueError("Either tokenizer or vocabulary must be provided.")
     # Create encoded_char_offsets for word/segment generation
     char_timestamps = hypotheses.timestamp['char']
     encoded_char_offsets = []
+
     for char_offset in char_timestamps:
         enc_char_offset = char_offset.copy()
-        token = enc_char_offset.get('token', None)
-        enc_char_offset['char'] = token if token is not None else tokenizer.ids_to_tokens(enc_char_offset['token_id'])
+        if lang_id:
+            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']], lang_id=lang_id)
+        else:
+            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']])
+        
+        char_offset.pop('token_id', None)
+        char_offset.pop('token', None)
         encoded_char_offsets.append(enc_char_offset)
 
     # Generate word-level timestamps from combined char timestamps
-    
+    # Wrap tokens_to_text to include lang_id if specified
+    if lang_id:
+        decode_fn = lambda tokens: tokenizer.ids_to_text(tokens, lang_id=lang_id)
+    else:
+        decode_fn = tokenizer.ids_to_text
+
+
     word_offsets = get_words_offsets(
         char_offsets=char_timestamps,
-        decode_tokens_to_str=decoding.decode_tokens_to_str,
+        decode_tokens_to_str=decode_fn,
         encoded_char_offsets=encoded_char_offsets,
         supported_punctuation={',', '.', '!', '?'},
     )
@@ -401,13 +452,20 @@ def update_timestamps(hypotheses, decoding, tokenizer=None, timestamps_type=None
     if timestamps_type is not None:
         if 'word' in timestamps_type or 'all' in timestamps_type:
             hypotheses.timestamp['word'] = word_offsets
+        else:
+            hypotheses.timestamp.pop('word', None)
         if 'segment' in timestamps_type or 'all' in timestamps_type:
             hypotheses.timestamp['segment'] = segment_offsets
+        else:
+            hypotheses.timestamp.pop('segment', None)
         if 'char' in timestamps_type or 'all' in timestamps_type:
             hypotheses.timestamp['char'] = char_timestamps
+        else:
+            hypotheses.timestamp.pop('char', None)
     else:
         hypotheses.timestamp['word'] = word_offsets
         hypotheses.timestamp['segment'] = segment_offsets
+        hypotheses.timestamp.pop('char', None)
     return hypotheses
 
 
@@ -449,13 +507,13 @@ def join_confidence_values(merged_hypothesis, hypotheses):
     return merged_hypothesis
 
 
-def join_timestamp_and_add_word_and_segment_level_timestamps(
+def join_char_timestamp_add_word_and_segment_level_timestamps(
     merged_hypotheses,
     hypotheses,
     chunk_offsets,
     subsampling_factor,
     window_stride,
-    decoding,
+    tokenizer,
     merged_tokens=None,
     timestamps_type=None,
 ):
@@ -481,8 +539,338 @@ def join_timestamp_and_add_word_and_segment_level_timestamps(
 
     ) 
     merged_hypotheses.timestamp['char'] = char_timestamps
+
+    return update_timestamps(merged_hypotheses, tokenizer, timestamps_type)
+
+
+def join_word_level_timestamps_add_segment_level_timestamps(
+    merged_hypotheses,
+    hypotheses,
+    chunk_offsets,
+    subsampling_factor,
+    window_stride,
+    merged_text,
+    timestamps_type=None,
+    similarity_threshold=0.7,
+):
+    """
+    Merge word-level timestamps from chunked hypotheses when lang_id is provided.
     
-    return update_timestamps(merged_hypotheses, decoding, timestamps_type)
+    When lang_id is given, timestamps are word-level (not char-level), so we need
+    a different approach to merge them. This function:
+    1. Gets the expected words from the merged token text as ground truth
+    2. Adjusts word timestamps with chunk offsets
+    3. Handles overlapping words at chunk boundaries using similarity matching against expected words
+    4. Removes duplicate words that appear in the overlap region
+    5. Concatenates words that were split across chunks (verified against expected words)
+    
+    Args:
+        merged_hypotheses: Target hypothesis to update with merged timestamps
+        hypotheses: List of hypotheses from different chunks
+        chunk_offsets: Frame offsets for each chunk
+        subsampling_factor: Subsampling factor of the encoder
+        window_stride: Time stride per frame in seconds
+        tokenizer: Tokenizer for text operations
+        merged_tokens: Token sequence after LCS merge
+        timestamps_type: Types of timestamps to include ('word', 'segment', 'all')
+        lang_id: Language ID for multilingual models
+        similarity_threshold: Threshold for word similarity matching (0.0-1.0)
+    
+    Returns:
+        Hypothesis: Updated merged_hypotheses with word and segment timestamps
+    """
+    subsamp = subsampling_factor
+    stride = window_stride
+    
+
+    expected_words = merged_text.split()
+    
+    # Collect all word timestamps from all chunks with offset adjustments
+    all_word_timestamps = []
+    cumulative_time_offset = 0.0
+    cumulative_frame_offset = 0
+    
+    delay = int(1 / (subsampling_factor / 100))  # overlap in frames
+    overlap_time = delay * stride * subsamp  # overlap time in seconds
+    
+    for chunk_idx, hyp in enumerate(hypotheses):
+        chunk_words = hyp.timestamp.get('word', [])
+        if not chunk_words:
+            continue
+        
+        # Calculate offset for this chunk
+        if chunk_idx > 0:
+            chunk_frame_offset = chunk_offsets[chunk_idx] // subsamp
+            cumulative_frame_offset += chunk_frame_offset
+            cumulative_time_offset = cumulative_frame_offset * stride * subsamp
+        
+        # Adjust timestamps for this chunk
+        adjusted_words = []
+        for word_info in chunk_words:
+            adjusted_word = word_info.copy()
+            
+            # Adjust frame offsets
+            if 'start_offset' in adjusted_word and adjusted_word['start_offset'] != -1:
+                adjusted_word['start_offset'] += cumulative_frame_offset
+            if 'end_offset' in adjusted_word and adjusted_word['end_offset'] != -1:
+                adjusted_word['end_offset'] += cumulative_frame_offset
+            
+            # Adjust time values
+            if 'start' in adjusted_word and adjusted_word['start'] != -1:
+                adjusted_word['start'] += cumulative_time_offset
+            if 'end' in adjusted_word and adjusted_word['end'] != -1:
+                adjusted_word['end'] += cumulative_time_offset
+            
+            # Track which chunk this word came from
+            adjusted_word['_chunk_idx'] = chunk_idx
+            adjusted_words.append(adjusted_word)
+        
+        all_word_timestamps.append({
+            'chunk_idx': chunk_idx,
+            'words': adjusted_words,
+            'overlap_start_time': cumulative_time_offset if chunk_idx > 0 else None,
+        })
+    
+    # Merge words handling overlaps, using expected_words as ground truth
+    merged_words = _merge_word_timestamps_with_overlap(
+        all_word_timestamps,
+        expected_words,
+        overlap_time,
+        similarity_threshold,
+    )
+    
+    # Clean up internal tracking fields
+    for word in merged_words:
+        word.pop('_chunk_idx', None)
+        word.pop('_overlap_start', None)
+    
+    # Generate segment timestamps from word timestamps
+    segment_offsets = get_segment_offsets(
+        word_offsets=merged_words,
+        segment_delimiter_tokens={'.', '!', '?', "..."},
+    )
+    
+    # Update the merged hypothesis with timestamps
+    if timestamps_type is not None:
+        if 'word' in timestamps_type or 'all' in timestamps_type:
+            merged_hypotheses.timestamp['word'] = merged_words
+        else:
+            merged_hypotheses.timestamp.pop('word', None)
+        if 'segment' in timestamps_type or 'all' in timestamps_type:
+            merged_hypotheses.timestamp['segment'] = segment_offsets
+        else:
+            merged_hypotheses.timestamp.pop('segment', None)
+    else:
+        merged_hypotheses.timestamp['word'] = merged_words
+        merged_hypotheses.timestamp['segment'] = segment_offsets
+    
+    return merged_hypotheses
+
+
+def _merge_word_timestamps_with_overlap(
+    all_word_timestamps: List[dict],
+    expected_words: List[str],
+    overlap_time: float,
+    similarity_threshold: float = 0.7,
+) -> List[dict]:
+    """
+    Merge word timestamps from multiple chunks by matching against expected words from merged text.
+    
+    This function uses the expected words (from the merged token text) as ground truth to:
+    1. Determine which chunk words to keep vs. remove (duplicates from overlap)
+    2. Determine when to concatenate words (by checking if concatenation matches expected word)
+    3. Ensure the final word list matches the expected merged text
+    
+    Args:
+        all_word_timestamps: List of dicts with 'chunk_idx', 'words', 'overlap_start_time'
+        expected_words: List of expected words from the merged token text (ground truth)
+        overlap_time: Duration of overlap between chunks in seconds
+        similarity_threshold: Threshold for considering words as matches
+    
+    Returns:
+        List of merged word timestamp dictionaries
+    """
+    if not all_word_timestamps:
+        return []
+    
+    if not expected_words:
+        # No expected words - just concatenate all chunk words
+        all_words = []
+        for chunk_data in all_word_timestamps:
+            all_words.extend(chunk_data['words'])
+        return all_words
+    
+    # Flatten all chunk words into a single list with chunk info preserved
+    all_chunk_words = []
+    for chunk_data in all_word_timestamps:
+        chunk_idx = chunk_data['chunk_idx']
+        overlap_start = chunk_data.get('overlap_start_time')
+        for word in chunk_data['words']:
+            word_copy = word.copy()
+            word_copy['_chunk_idx'] = chunk_idx
+            word_copy['_overlap_start'] = overlap_start
+            all_chunk_words.append(word_copy)
+    
+    # Match expected words against chunk words
+    merged_words = []
+    chunk_word_idx = 0
+    
+    for _, expected_word in enumerate(expected_words):
+        best_match = None
+        best_match_idx = -1
+        best_similarity = 0.0
+        concat_match = None
+        concat_end_idx = -1
+        
+        # Only search for matches if we still have chunk words
+        if chunk_word_idx < len(all_chunk_words):
+            # Search for the best match within a window
+            search_window = min(10, len(all_chunk_words) - chunk_word_idx)
+            
+            for i in range(chunk_word_idx, chunk_word_idx + search_window):
+                if i >= len(all_chunk_words):
+                    break
+                
+                candidate = all_chunk_words[i]
+                candidate_text = candidate.get('word', '')
+                
+                # Check direct match
+                similarity = word_similarity(candidate_text, expected_word)
+                if similarity > best_similarity and similarity >= similarity_threshold:
+                    best_similarity = similarity
+                    best_match = candidate
+                    best_match_idx = i
+                
+                # Check if concatenating with next word(s) matches expected word
+                # This handles split words like "exclu" + "des" -> "excludes"
+                if i + 1 < len(all_chunk_words):
+                    next_candidate = all_chunk_words[i + 1]
+                    combined_text = candidate_text + next_candidate.get('word', '')
+                    concat_similarity = word_similarity(combined_text, expected_word)
+                    
+                    if concat_similarity > best_similarity and concat_similarity >= similarity_threshold:
+                        # Concatenation is a better match
+                        best_similarity = concat_similarity
+                        concat_match = (candidate, next_candidate)
+                        concat_end_idx = i + 1
+                        best_match = None  # Use concat instead
+        
+        # Apply the best match found
+        if concat_match is not None:
+            # Concatenate the words - use expected_word text to guarantee exact match
+            word1, word2 = concat_match
+            merged_word = word1.copy()
+            merged_word['word'] = expected_word  # Use expected word, not concatenated chunk words
+            merged_word['end'] = word2.get('end', word1.get('end', 0))
+            merged_word['end_offset'] = word2.get('end_offset', word1.get('end_offset', -1))
+            
+            # Fix timing if needed
+            if merged_words:
+                last_end = merged_words[-1].get('end', 0)
+                if merged_word.get('start', 0) < last_end:
+                    merged_word['start'] = last_end
+                    merged_word['start_offset'] = merged_words[-1].get('end_offset', -1)
+            
+            merged_words.append(merged_word)
+            chunk_word_idx = concat_end_idx + 1
+            
+        elif best_match is not None:
+            merged_word = best_match.copy()
+            # Use expected word text to guarantee exact match with merged text
+            merged_word['word'] = expected_word
+            
+            # Fix timing if needed
+            if merged_words:
+                last_end = merged_words[-1].get('end', 0)
+                if merged_word.get('start', 0) < last_end:
+                    merged_word['start'] = last_end
+                    merged_word['start_offset'] = merged_words[-1].get('end_offset', -1)
+            
+            merged_words.append(merged_word)
+            chunk_word_idx = best_match_idx + 1
+            
+            # Skip duplicate words from overlap (same word appearing in next chunk)
+            while chunk_word_idx < len(all_chunk_words):
+                next_word = all_chunk_words[chunk_word_idx]
+                next_text = next_word.get('word', '')
+                
+                # Check if this is a duplicate of what we just added
+                dup_similarity = word_similarity(next_text, expected_word)
+                if dup_similarity >= similarity_threshold:
+                    # Check time proximity to confirm it's in overlap region
+                    time_diff = abs(next_word.get('start', 0) - merged_word.get('end', 0))
+                    if time_diff <= overlap_time:
+                        # This is a duplicate from overlap - skip it
+                        chunk_word_idx += 1
+                        continue
+                break
+        else:
+            # No match found - add expected word with zero-duration timestamp
+            # Use the previous word's end time as both start and end
+            if merged_words:
+                last_word = merged_words[-1]
+                merged_word = {
+                    'word': expected_word,
+                    'start': last_word.get('end', 0),
+                    'end': last_word.get('end', 0),
+                    'start_offset': last_word.get('end_offset', -1),
+                    'end_offset': last_word.get('end_offset', -1),
+                }
+            else:
+                # First word with no match - use zeros
+                merged_word = {
+                    'word': expected_word,
+                    'start': 0,
+                    'end': 0,
+                    'start_offset': 0,
+                    'end_offset': 0,
+                }
+            
+            merged_words.append(merged_word)
+    
+    # Final timing fix pass to ensure no overlaps
+    merged_words = _fix_word_timing(merged_words)
+    
+    # At this point, merged_words has exactly len(expected_words) items
+    # Each word text matches the corresponding expected word
+    
+    return merged_words
+
+
+def _fix_word_timing(words: List[dict]) -> List[dict]:
+    """
+    Fix timing issues in merged words to ensure non-overlapping timestamps.
+    
+    This function only adjusts timing - it does NOT remove any words,
+    preserving the exact correspondence with expected words from merged text.
+    
+    Args:
+        words: List of word timestamp dictionaries
+    
+    Returns:
+        List of word timestamps with fixed timing
+    """
+    if not words:
+        return words
+    
+    fixed = []
+    
+    for word in words:
+        word_copy = word.copy()
+        
+        if fixed:
+            last_word = fixed[-1]
+            last_end = last_word.get('end', 0)
+            
+            # Fix timing overlap - ensure current word starts after last word ends
+            if word_copy.get('start', 0) < last_end:
+                word_copy['start'] = last_end
+                if 'start_offset' in word_copy and 'end_offset' in last_word:
+                    word_copy['start_offset'] = last_word['end_offset']
+        
+        fixed.append(word_copy)
+    
+    return fixed
 
 def join_char_level_timestamps(
     hypotheses,
@@ -587,13 +975,24 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
         chunk_duration_seconds: Duration of each chunk in seconds (default: 3600)
 
     Returns:
-        List[Hypothesis]: List of merged hypotheses, one per unique ID
+        List[Hypothesis]: List of merged hypotheses, one per unique ID.
+        If hypotheses have no ID (None), they are returned as-is without merging.
     """
     same_audio_hypotheses = []
     all_merged_hypotheses = []
     prev_id = None
     for h in hypotheses_list:
-        current_id = _normalize_hypothesis_group_id(h.id)
+
+        # This will form the current ids of the same audio file
+        if hasattr(h, 'id'):
+            current_id = _normalize_hypothesis_group_id(h.id)
+        else:
+            current_id = None
+
+        # If id is None, return the hypothesis as-is without merging
+        if current_id is None:
+            all_merged_hypotheses.append(h)
+            continue
 
         # If this is a new ID (different from previous), process the accumulated hypotheses
         if prev_id is not None and current_id != prev_id:
@@ -601,7 +1000,7 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
 
                 all_merged_hypotheses.append(
                     merge_hypotheses_of_same_audio(
-                        same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type
+                        same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds,
                     )
                 )
             same_audio_hypotheses = []
@@ -614,14 +1013,14 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
     if same_audio_hypotheses:
         all_merged_hypotheses.append(
             merge_hypotheses_of_same_audio(
-                same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type
+                same_audio_hypotheses, timestamps, subsampling_factor, chunk_duration_seconds,
             )
         )
     return all_merged_hypotheses
 
 
 def merge_hypotheses_of_same_audio(
-    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None
+    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600,
 ):
     """
     Merge hypotheses from the same audio source into a single hypothesis.
@@ -637,27 +1036,25 @@ def merge_hypotheses_of_same_audio(
     Returns:
         Hypothesis: Single merged hypothesis
     """
-
-    # Create merged hypothesis with empty initial values
-    if timestamps:
-        if timestamps_type and 'all' in timestamps_type:
-            timestamp_dict = {'char': [], 'word': [], 'segment': []}
-        elif timestamps_type:
-            timestamp_dict = {timestamps_type[0]: []}
-        else:
-            timestamp_dict = {'word': [], 'segment': []}
-    else:
-        timestamp_dict = []
-        
     merged_hypothesis = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
-        timestamp=timestamp_dict,
-    )   
-    merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses_list])
+        timestamp=([] if not timestamps else {}),
+    )
+    
+    # Filter valid y_sequences (1D tensors with at least one element)
+    valid_y_sequences = [
+        h.y_sequence for h in hypotheses_list 
+        if h.y_sequence.dim() == 1 and h.y_sequence.size(0) > 0
+    ]
+    if valid_y_sequences:
+        merged_hypothesis.y_sequence = torch.cat(valid_y_sequences)
 
     # Merge confidence values from all hypotheses
     merged_hypothesis = join_confidence_values(merged_hypothesis, hypotheses_list)
+    # Set score to minimum of all chunk scores, length to sum of all chunk lengths
+    merged_hypothesis.score = min(h.score for h in hypotheses_list)
+    merged_hypothesis.length = sum(h.length if isinstance(h.length, int) else h.length.item() for h in hypotheses_list)
 
     # Create final text by joining text from all hypotheses
     text_parts = []
@@ -667,7 +1064,7 @@ def merge_hypotheses_of_same_audio(
     merged_hypothesis.text = ' '.join(text_parts)
 
     # Handle timestamps with proper time offsets (word and segment only)
-    if timestamps and len(hypotheses_list) > 0 and getattr(hypotheses_list[0], "timestamp", {}):
+    if timestamps and len(hypotheses_list) > 1 and getattr(hypotheses_list[0], "timestamp", {}):
         # Calculate time offsets for each chunk (in seconds)
         merged_word_timestamps = []
         merged_segment_timestamps = []
@@ -748,51 +1145,58 @@ def merge_hypotheses_of_same_audio(
                     else:
                         merged_segment_timestamps.append(segment_info)
             # Merge char timestamps with offset (for RNNT models)
-            if timestamps_type:
-                if 'char' in hyp.timestamp and hyp.timestamp['char']:
-                    for char_info in hyp.timestamp['char']:
-                        if isinstance(char_info, dict):
-                            adjusted_char = char_info.copy()
-                            # Adjust start and end times
-                            if (
-                                'start' in adjusted_char
-                                and adjusted_char['start'] is not None
-                                and adjusted_char['start'] != -1
-                            ):
-                                adjusted_char['start'] += time_offset
-                            if (
-                                'end' in adjusted_char
-                                and adjusted_char['end'] is not None
-                                and adjusted_char['end'] != -1
-                            ):
-                                adjusted_char['end'] += time_offset
-                            # Adjust start and end offsets (frame counts)
-                            if (
-                                'start_offset' in adjusted_char
-                                and adjusted_char['start_offset'] is not None
-                                and adjusted_char['start_offset'] != -1
-                            ):
-                                adjusted_char['start_offset'] += frame_offset
-                            if (
-                                'end_offset' in adjusted_char
-                                and adjusted_char['end_offset'] is not None
-                                and adjusted_char['end_offset'] != -1
-                            ):
-                                adjusted_char['end_offset'] += frame_offset
-                            merged_char_timestamps.append(adjusted_char)
-                        else:
-                            merged_char_timestamps.append(char_info)
+            if 'char' in hyp.timestamp and hyp.timestamp['char']:
+                for char_info in hyp.timestamp['char']:
+                    if isinstance(char_info, dict):
+                        adjusted_char = char_info.copy()
+                        # Adjust start and end times
+                        if (
+                            'start' in adjusted_char
+                            and adjusted_char['start'] is not None
+                            and adjusted_char['start'] != -1
+                        ):
+                            adjusted_char['start'] += time_offset
+                        if (
+                            'end' in adjusted_char
+                            and adjusted_char['end'] is not None
+                            and adjusted_char['end'] != -1
+                        ):
+                            adjusted_char['end'] += time_offset
+                        # Adjust start and end offsets (frame counts)
+                        if (
+                            'start_offset' in adjusted_char
+                            and adjusted_char['start_offset'] is not None
+                            and adjusted_char['start_offset'] != -1
+                        ):
+                            adjusted_char['start_offset'] += frame_offset
+                        if (
+                            'end_offset' in adjusted_char
+                            and adjusted_char['end_offset'] is not None
+                            and adjusted_char['end_offset'] != -1
+                        ):
+                            adjusted_char['end_offset'] += frame_offset
+                        merged_char_timestamps.append(adjusted_char)
+                    else:
+                        merged_char_timestamps.append(char_info)
 
 
         # Set the merged timestamps
         if timestamps:
-            if timestamps_type:
+            if merged_char_timestamps:
                 merged_hypothesis.timestamp['char'] = merged_char_timestamps
-            merged_hypothesis.timestamp['word']= merged_word_timestamps
-            merged_hypothesis.timestamp['segment']= merged_segment_timestamps
+            if merged_word_timestamps:
+                merged_hypothesis.timestamp['word'] = merged_word_timestamps
+            if merged_segment_timestamps:
+                merged_hypothesis.timestamp['segment'] = merged_segment_timestamps
+              
     elif len(hypotheses_list) == 1 and timestamps:
-        if timestamps_type:
+        if hypotheses_list[0].timestamp.get('char', None):
             merged_hypothesis.timestamp['char'] = hypotheses_list[0].timestamp['char']
-        merged_hypothesis.timestamp['word'] = hypotheses_list[0].timestamp['word']
-        merged_hypothesis.timestamp['segment'] = hypotheses_list[0].timestamp['segment']
+        if hypotheses_list[0].timestamp.get('word', None):
+            merged_hypothesis.timestamp['word'] = hypotheses_list[0].timestamp['word']
+        if hypotheses_list[0].timestamp.get('segment', None):
+            merged_hypothesis.timestamp['segment'] = hypotheses_list[0].timestamp['segment']
+    else:
+        pass
+        # merged_hypothesis.pop('timestamp', None)
     return merged_hypothesis

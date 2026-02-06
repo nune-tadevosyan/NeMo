@@ -993,11 +993,12 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 hypotheses=hyp,
                 encoded_len=encoded_len,
                 timestamps=trcfg.timestamps,
-                tokenizer=self.tokenizer,
+                tokenizer=getattr(self, 'tokenizer', None),
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 timestamps_type=final_timestamps_type,
-                )
+                vocabulary=getattr(self.joint, 'vocabulary', None),
+            )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
             return [merged_hypotheses]
@@ -1006,7 +1007,10 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             single_hypothesis = hyp[0]
             if trcfg.timestamps:
                 single_hypothesis = update_timestamps(
-                    single_hypothesis, self.decoding, self.tokenizer, final_timestamps_type
+                    single_hypothesis,
+                    tokenizer=getattr(self, 'tokenizer', None),
+                    timestamps_type=final_timestamps_type,
+                    vocabulary=getattr(self.joint, 'vocabulary', None),
                 )
             setattr(single_hypothesis, 'id', cut_id)
             return [single_hypothesis]

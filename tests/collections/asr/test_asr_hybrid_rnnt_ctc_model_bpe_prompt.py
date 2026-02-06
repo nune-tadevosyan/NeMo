@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 
+import librosa
 import pytest
 import torch
 from omegaconf import DictConfig

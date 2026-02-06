@@ -13,6 +13,7 @@
 # limitations under the License.
 import copy
 import os
+import uuid
 from math import ceil
 from typing import Any, Dict, List, Optional, Union
 
@@ -40,6 +41,7 @@ from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_confi
 from nemo.collections.common.parts.preprocessing.parsers import make_parser
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.mixins import AccessMixin
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType
 from nemo.utils import logging
 
@@ -127,6 +129,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
+        enable_chunking: bool = True,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -151,6 +154,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 object (output.timestep['segment']/output.timestep['word']). Refer to `Hypothesis` class 
                 for more details. Default is None and would retain the previous state set by 
                 using self.change_decoding_strategy().
+            enable_chunking: (bool) whether to enable parallel chunking for transcription.
             verbose: (bool) whether to display tqdm progress bar
             override_config: (Optional[TranscribeConfig]) override transcription config pre-defined by the user.
                 **Note**: All other arguments in the function will be ignored if override_config is passed.
@@ -177,7 +181,6 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                     self.cfg.decoding.compute_timestamps = self.cfg.decoding.get('compute_timestamps', False)
                     self.cfg.decoding.preserve_alignments = self.cfg.decoding.get('preserve_alignments', False)
                 self.change_decoding_strategy(self.cfg.decoding, verbose=False)
-
         return super().transcribe(
             audio=audio,
             batch_size=batch_size,
@@ -187,6 +190,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             augmentor=augmentor,
             verbose=verbose,
             timestamps=timestamps,
+            enable_chunking=enable_chunking,
             override_config=override_config,
         )
 
@@ -304,6 +308,13 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         # Automatically inject args from model config to dataloader config
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='sample_rate')
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='labels')
+    
+        enable_chunking = config.get("enable_chunking", False)
+        if enable_chunking:
+            config['use_lhotse'] = True
+            # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
+            config.cut_into_windows_duration = 3600
+            config.cut_into_windows_hop = 3600
 
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(
@@ -322,6 +333,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                         do_normalize=config.get('normalize_transcripts', False),
                     ),
                     return_cuts=config.get("do_transcribe", False),
+                    enable_chunking=enable_chunking,
                 ),
             )
 
@@ -610,7 +622,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             )
         else:
             log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
-
+        
         transcribed_texts = self.wer.decoding.ctc_decoder_predictions_tensor(
             decoder_outputs=log_probs,
             decoder_lengths=encoded_len,
@@ -699,17 +711,25 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
     def _transcribe_forward(self, batch: Any, trcfg: TranscribeConfig):
         logits, logits_len, greedy_predictions = self.forward(input_signal=batch[0], input_signal_length=batch[1])
         output = dict(logits=logits, logits_len=logits_len)
+        if trcfg.enable_chunking:
+            output['cuts'] = batch[-1]
         del greedy_predictions
         return output
 
     def _transcribe_output_processing(self, outputs, trcfg: TranscribeConfig) -> GenericTranscriptionType:
         logits = outputs.pop('logits')
         logits_len = outputs.pop('logits_len')
-
+        cuts = outputs.pop('cuts', None)
+        if trcfg.timestamps and trcfg.enable_chunking:
+            final_timestamps_type = self.cfg.decoding.ctc_timestamp_type
+            self.decoding.cfg.ctc_timestamp_type = 'char'
+        else:
+            final_timestamps_type = None
         hypotheses = self.decoding.ctc_decoder_predictions_tensor(
             logits,
             decoder_lengths=logits_len,
             return_hypotheses=trcfg.return_hypotheses,
+            return_token_ids=trcfg.enable_chunking, #If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
         )
         if trcfg.return_hypotheses:
             if logits.is_cuda:
@@ -733,14 +753,45 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             del logits_cpu
 
         # cleanup memory
-        del logits, logits_len
-
+        del logits
         if trcfg.timestamps:
             hypotheses = process_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
+        if trcfg.enable_chunking:
+            if cuts is not None and hasattr(cuts[0], 'id'):
+                cut_id = cuts[0].id
+            else:
+                cut_id = f'audio_{uuid.uuid4().int}'
+        if trcfg.enable_chunking and len(hypotheses) > 1:
+            merged_hypotheses = merge_chunked_hypotheses(
+                hypotheses=hypotheses,
+                encoded_len=logits_len,
+                timestamps=trcfg.timestamps,
+                tokenizer=getattr(self, 'tokenizer', None),
+                subsampling_factor=self.encoder.subsampling_factor,
+                window_stride=self.cfg['preprocessor']['window_stride'],
+                timestamps_type=final_timestamps_type,
+                vocabulary=getattr(self.decoder, 'vocabulary', None),
+            )
+            # Inject the id of the cut to hypothesis to later be used for separate batches
+            setattr(merged_hypotheses, 'id', cut_id)
+            return [merged_hypotheses]
 
-        return hypotheses
+        elif trcfg.enable_chunking:
+            single_hypothesis = hypotheses[0]
+            if trcfg.timestamps:
+                single_hypothesis = update_timestamps(
+                    single_hypothesis,
+                    tokenizer=getattr(self, 'tokenizer', None),
+                    timestamps_type=final_timestamps_type,
+                    vocabulary=getattr(self.decoder, 'vocabulary', None),
+                )
+            setattr(single_hypothesis, 'id', cut_id)
+            return [single_hypothesis]
+        else:
+            return hypotheses
+
 
     def get_best_hyptheses(self, all_hypothesis: list[list[Hypothesis]]):
         return [hyp[0] for hyp in all_hypothesis]
@@ -780,6 +831,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
             'pin_memory': True,
             'channel_selector': config.get('channel_selector', None),
+            'enable_chunking': config.get('enable_chunking', False),
         }
         if config.get("augmentor"):
             dl_config['augmentor'] = config.get("augmentor")

@@ -716,6 +716,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                     Look at rnnt_utils.Hypothesis for more information.
         """
         # Compute hypotheses
+        
         with torch.inference_mode():
             hypotheses_list = self.decoding(
                 encoder_output=encoder_output, encoded_lengths=encoded_lengths, partial_hypotheses=partial_hypotheses
