@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-from operator import imod
 import os
 import uuid
 from math import ceil
