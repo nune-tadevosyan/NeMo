@@ -142,7 +142,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
-        cfg = model_utils.maybe_update_config_version(cfg)
+        cfg = model_utils.maybe_update_config_version(cfg, make_copy=False)
         _config_check(cfg)
 
         self.prompt_format = cfg.prompt_format
@@ -576,12 +576,14 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 )
             trcfg = override_config
             trcfg.timestamps = timestamps
+
         ###
         ###  Remove this after testing
         ##
         #trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
         import pdb; pdb.set_trace()
         return super().transcribe(audio=audio, override_config=trcfg)
+
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
 
@@ -1063,7 +1065,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-        
         if merge_to_be_done:
             merged_hypotheses = merge_chunked_hypotheses(
                 hypotheses=hypotheses,
@@ -1300,18 +1301,34 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         The config and weights are expected to be in the main .nemo file and be named `timestamps_asr_model_config.yaml` and `timestamps_asr_model_weights.ckpt` respectively.
         """
         app_state = AppState()
+        nemo_file_folder = app_state.nemo_file_folder  # Already-extracted temp directory
         model_restore_path = app_state.model_restore_path
 
         if not model_restore_path:
             return None
 
         save_restore_connector = SaveRestoreConnector()
+        save_restore_connector.model_config_yaml = os.path.join(nemo_file_folder, "timestamps_asr_model_config.yaml")
+        save_restore_connector.model_weights_ckpt = os.path.join(nemo_file_folder, "timestamps_asr_model_weights.ckpt")
 
-        filter_fn = lambda name: "timestamps_asr_model" in name
-        members = save_restore_connector._filtered_tar_info(model_restore_path, filter_fn=filter_fn)
+        # Check if the model_restore_path is already an extracted directory (which happens during restore_from)
+        # If so, use it directly to avoid double extraction
+        if app_state.nemo_file_folder and os.path.isdir(app_state.nemo_file_folder):
+            # Verify that the timestamp model components exist in the extracted folder
+            config_exists = os.path.exists(save_restore_connector.model_config_yaml)
+            weights_exists = os.path.exists(save_restore_connector.model_weights_ckpt)
 
-        if not members:
-            return None
+            if not (config_exists and weights_exists):
+                return None
+
+            save_restore_connector.model_extracted_dir = app_state.nemo_file_folder
+
+        else:
+            filter_fn = lambda name: "timestamps_asr_model" in name
+            members = save_restore_connector._filtered_tar_info(model_restore_path, filter_fn=filter_fn)
+
+            if not members:
+                return None
 
         try:
             save_restore_connector.model_config_yaml = "timestamps_asr_model_config.yaml"
@@ -1320,6 +1337,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 model_restore_path, save_restore_connector=save_restore_connector, map_location=map_location
             )
             external_timestamps_model.eval()
+
         except Exception as e:
             raise RuntimeError(
                 f"Error restoring external timestamps ASR model with timestamps_asr_model_config.yaml and timestamps_asr_model_weights.ckpt: {e}"
