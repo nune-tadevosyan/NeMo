@@ -14,7 +14,6 @@
 
 import os
 import uuid
-from re import I
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,7 +42,6 @@ from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDecoding, MultiTaskDecodingConfig
 from nemo.collections.asr.parts.submodules.token_classifier import TokenClassifier
 from nemo.collections.asr.parts.utils.chunking_utils import (
-    merge_all_hypotheses,
     merge_chunked_hypotheses,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
@@ -577,10 +575,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             trcfg = override_config
             trcfg.timestamps = timestamps
 
-        ###
-        ###  Remove this after testing
-        ##
-        #trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
         return super().transcribe(audio=audio, override_config=trcfg)
 
 
