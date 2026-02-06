@@ -121,8 +121,7 @@ class TestASRConfidenceBenchmark:
         )
         assert model.cfg.decoding.greedy.confidence_method_cfg.alpha == 0.5
 
-    @pytest.mark.integration
-    @pytest.mark.with_downloads
+    @pytest.mark.unit
     def test_aed_multitask_model_confidence(self, canary_1b_v2, test_data_dir):
         """Test token and word confidence for AED multitask models (Canary)."""
         model = canary_1b_v2
