@@ -319,7 +319,8 @@ class TestTranscriptionMixin:
         audio_file = os.path.join(test_data_dir, "asr", "train", "an4", "wav", "an46-mmap-b.wav")
 
         # Audio file test
-        outputs = fast_conformer_ctc_model.transcribe(audio_file, batch_size=1, return_hypotheses=True)
+        #setting enable_chunking False for alignment check
+        outputs = fast_conformer_ctc_model.transcribe(audio_file, batch_size=1, return_hypotheses=True, enable_chunking=False) 
         assert len(outputs) == 1
         assert isinstance(outputs[0], Hypothesis)
 

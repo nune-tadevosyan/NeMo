@@ -136,7 +136,12 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
         self.cur_decoder = "rnnt"
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
-
+        enable_chunking = config.get("enable_chunking", False)
+        if enable_chunking:
+            config['use_lhotse'] = True
+            # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
+            config.cut_into_windows_duration = 3600
+            config.cut_into_windows_hop = 3600
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(
                 config,
@@ -147,7 +152,8 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
                 world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
                 dataset=LhotseSpeechToTextBpeDataset(
                     tokenizer=self.tokenizer,
-                    return_cuts=config.get("do_transcribe", False),
+                    return_cuts=config.get("do_transcribe", False) or enable_chunking,
+                    enable_chunking=enable_chunking,
                 ),
                 tokenizer=self.tokenizer,
             )
@@ -242,6 +248,7 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             'pin_memory': True,
             'channel_selector': config.get('channel_selector', None),
             'use_start_end_token': self.cfg.validation_ds.get('use_start_end_token', False),
+            'enable_chunking': config.get('enable_chunking', False),
         }
 
         if config.get("augmentor"):

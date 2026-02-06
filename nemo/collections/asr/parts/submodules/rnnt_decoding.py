@@ -693,6 +693,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
         encoded_lengths: torch.Tensor,
         return_hypotheses: bool = False,
         partial_hypotheses: Optional[List[Hypothesis]] = None,
+        return_token_ids: bool = False,
     ) -> Union[List[Hypothesis], List[List[Hypothesis]]]:
         """
         Decode an encoder output by autoregressive decoding of the Decoder+Joint networks.
@@ -734,7 +735,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
                 if self.compute_timestamps is True:
                     timestamp_type = self.cfg.get('rnnt_timestamp_type', 'all')
                     for hyp_idx in range(len(decoded_hyps)):
-                        decoded_hyps[hyp_idx] = self.compute_rnnt_timestamps(decoded_hyps[hyp_idx], timestamp_type)
+                        decoded_hyps[hyp_idx] = self.compute_rnnt_timestamps(decoded_hyps[hyp_idx], timestamp_type, return_token_ids)
 
                 hypotheses.append(decoded_hyps[0])  # best hypothesis
                 all_hypotheses.append(decoded_hyps)
@@ -752,7 +753,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             if self.compute_timestamps is True:
                 timestamp_type = self.cfg.get('rnnt_timestamp_type', 'all')
                 for hyp_idx in range(len(hypotheses)):
-                    hypotheses[hyp_idx] = self.compute_rnnt_timestamps(hypotheses[hyp_idx], timestamp_type)
+                    hypotheses[hyp_idx] = self.compute_rnnt_timestamps(hypotheses[hyp_idx], timestamp_type, return_token_ids)
 
             if return_hypotheses:
                 # greedy decoding, can get high-level confidence scores
@@ -987,7 +988,7 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             logging.info("Joint fused batch size <= 0; Will temporarily disable fused batch step in the Joint.")
             self.decoding.joint.set_fuse_loss_wer(False)
 
-    def compute_rnnt_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all"):
+    def compute_rnnt_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all", return_token_ids: bool = False):
         """
         Computes character, word, and segment timestamps for an RNN-T hypothesis.
 
@@ -1035,7 +1036,8 @@ class AbstractRNNTDecoding(ConfidenceMixin):
             char_offsets[i]["char"] = chars_text
             encoded_char_offsets[i]["char"] = chars_tokens
             # Providing this to get word offsets in merged hypotheses after chunking
-            char_offsets[i]["token_id"] = chars_token_id
+            if return_token_ids:    
+                char_offsets[i]["token_id"] = chars_token_id
 
         encoded_char_offsets, char_offsets = self._refine_timestamps(
             encoded_char_offsets, char_offsets, self.supported_punctuation

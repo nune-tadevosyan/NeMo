@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import uuid
 from re import I
 import warnings
 from collections.abc import Mapping, Sequence
@@ -578,7 +579,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         ###
         ###  Remove this after testing
         ##
-        trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
+        #trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
+        import pdb; pdb.set_trace()
         return super().transcribe(audio=audio, override_config=trcfg)
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
@@ -948,7 +950,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 # Prompt to be built dynamically.
                 decoder_input_ids = None
         batch_size = audio.shape[0]
-
         log_probs, encoded_len, enc_states, enc_mask = self.forward(input_signal=audio, input_signal_length=audio_lens)
 
         if decoder_input_ids is None:
@@ -1021,9 +1022,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         enc_mask = outputs.pop('encoder_mask')
         decoder_input_ids = outputs.pop('decoder_input_ids') 
         batch = outputs.pop('batch')
-
         del log_probs
         num_chunks = enc_states.shape[0]
+        import pdb; pdb.set_trace()
         # Repear decoder_input_ids to match number of chunks
         if trcfg.enable_chunking and num_chunks > decoder_input_ids.shape[0]:
             decoder_input_ids = decoder_input_ids.repeat(num_chunks, 1)
@@ -1044,7 +1045,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 audio_lens = batch.audio_lens
                 lang_id = batch.cuts[0].supervisions[0].language if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
             else:  # TensorDataset / external DataLoader tuple type batch
-                cut_id = 'audio_0'
+                cut_id = f'audio_{uuid.uuid4().int}'
                 audio = batch[0]
                 audio_lens = batch[1]
                 lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
@@ -1062,7 +1063,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-
+        
         if merge_to_be_done:
             merged_hypotheses = merge_chunked_hypotheses(
                 hypotheses=hypotheses,
@@ -1076,7 +1077,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # Inject the id of the cut to hypothese to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
             return [merged_hypotheses]
-
         if trcfg.enable_chunking:
             for hyp in hypotheses:
                 setattr(hyp, 'id', cut_id)

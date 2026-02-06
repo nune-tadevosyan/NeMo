@@ -591,6 +591,7 @@ class TestEncDecMultiTaskModel:
         }
         model_stride_in_secs = 0.01 * 8  # feature_stride in sec * model_stride
         model.read_audio_file(audio_file, delay=0.0, model_stride_in_secs=model_stride_in_secs, meta_data=meta)
+        import pdb; pdb.set_trace()
         outputs = model.transcribe(timestamps=True)
 
         # check hypothesis object
@@ -600,6 +601,7 @@ class TestEncDecMultiTaskModel:
         assert outputs.text[:13] == "Now it's time", f"{outputs}"
 
         # check timestamps
+        import pdb; pdb.set_trace()
         assert outputs.timestamp['segment'][0]['start'] == pytest.approx(5.68)
         assert outputs.timestamp['segment'][0]['end'] == pytest.approx(9.68)
 
@@ -1139,7 +1141,7 @@ def test_aed_parallel_chunking(canary_1b_v2):
 
     hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False)
     assert len(hypotheses) == 1
-    assert hypotheses[0].timestamp == {}
+    assert hypotheses[0].timestamp == []
     ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True)
     assert len(ts_hypotheses) == 1
     assert ts_hypotheses[0].text == hypotheses[0].text

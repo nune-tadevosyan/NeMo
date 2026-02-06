@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import uuid
 from typing import Any, List, Optional, Union
 
 import torch
@@ -32,7 +33,7 @@ from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_o
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.mixins import AccessMixin
 from nemo.utils import logging, model_utils
-
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 
 class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRTranscriptionMixin):
     """Base class for hybrid RNNT/CTC models."""
@@ -103,6 +104,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: bool = None,
+        enable_chunking: bool = True,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -126,6 +128,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
             timestamps: Optional(Bool): timestamps will be returned if set to True as part of hypothesis object 
                 (output.timestep['segment']/output.timestep['word']). Refer to `Hypothesis` class for more details.
                 Default is None and would retain the previous state set by using self.change_decoding_strategy().
+            enable_chunking: (bool) whether to enable parallel chunking for transcription.
             verbose: (bool) whether to display tqdm progress bar
             logprobs: (bool) whether to return ctc logits insted of hypotheses
 
@@ -165,6 +168,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
             augmentor=augmentor,
             verbose=verbose,
             timestamps=timestamps,
+            enable_chunking=enable_chunking,
             override_config=override_config,
         )
 
@@ -189,7 +193,8 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
 
         logits = self.ctc_decoder(encoder_output=encoded)
         output = dict(logits=logits, encoded_len=encoded_len)
-
+        if trcfg.enable_chunking:
+            output['cuts'] = batch[-1]
         del encoded
         return output
 
@@ -202,7 +207,12 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         # CTC Path
         logits = outputs.pop('logits')
         encoded_len = outputs.pop('encoded_len')
-
+        cuts = outputs.pop('cuts', None)
+        if trcfg.timestamps and trcfg.enable_chunking:
+            final_timestamps_type = self.cfg.decoding.rnnt_timestamp_type
+            self.decoding.cfg.rnnt_timestamp_type = 'char'
+        else:
+            final_timestamps_type = None
         hypotheses = self.ctc_decoding.ctc_decoder_predictions_tensor(
             logits,
             encoded_len,
@@ -221,15 +231,41 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         # if logprobs:
         #     for logit, elen in zip(logits, encoded_len):
         #         logits_list.append(logit[:elen])
-
+        
         if trcfg.timestamps:
             hypotheses = process_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-
+        if trcfg.enable_chunking:
+            if cuts is not None and hasattr(cuts[0], 'id'):
+                cut_id = cuts[0].id
+            else:
+                cut_id = f'audio_{uuid.uuid4().int}'
         del logits, encoded_len
+        if trcfg.enable_chunking and len(hypotheses) > 1:
+            merged_hypotheses = merge_chunked_hypotheses(
+                hypotheses=hypotheses,
+                encoded_len=encoded_len,
+                timestamps=trcfg.timestamps,
+                tokenizer=self.tokenizer,
+                subsampling_factor=self.encoder.subsampling_factor,
+                window_stride=self.cfg['preprocessor']['window_stride'],
+                timestamps_type=final_timestamps_type,
+                )
+            # Inject the id of the cut to hypothesis to later be used for separate batches
+            setattr(merged_hypotheses, 'id', cut_id)
+            return [merged_hypotheses]
 
-        return hypotheses
+        elif trcfg.enable_chunking:
+            single_hypothesis = hypotheses[0]
+            if trcfg.timestamps:
+                single_hypothesis = update_timestamps(
+                    single_hypothesis, self.decoding, self.tokenizer, final_timestamps_type
+                )
+            setattr(single_hypothesis, 'id', cut_id)
+            return [single_hypothesis]
+        else:
+            return hypotheses
 
     def change_vocabulary(
         self,
