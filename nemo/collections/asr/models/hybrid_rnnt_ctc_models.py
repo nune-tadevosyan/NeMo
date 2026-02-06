@@ -164,7 +164,6 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                         decoding_cfg.compute_timestamps = False
             if need_change_decoding:
                 self.change_decoding_strategy(decoding_cfg, decoder_type=self.cur_decoder, verbose=False)
-        print("transcribe")
         return ASRTranscriptionMixin.transcribe(
             self,
             audio=audio,
@@ -239,7 +238,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         # if logprobs:
         #     for logit, elen in zip(logits, encoded_len):
         #         logits_list.append(logit[:elen])
-        
+        del logits
         if trcfg.timestamps:
             hypotheses = process_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
@@ -264,7 +263,6 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
             )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
-            del logits, encoded_len
             return [merged_hypotheses]
 
         elif trcfg.enable_chunking:
@@ -277,10 +275,8 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                     vocabulary=vocab,
                 )
             setattr(single_hypothesis, 'id', cut_id)
-            del logits, encoded_len
             return [single_hypothesis]
         else:
-            del logits, encoded_len
             return hypotheses
 
     def change_vocabulary(
