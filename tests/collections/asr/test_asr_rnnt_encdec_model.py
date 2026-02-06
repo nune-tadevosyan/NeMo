@@ -14,6 +14,7 @@
 import copy
 from typing import Any, Dict, List, Optional, Tuple
 
+import librosa
 import pytest
 import torch
 import torch.nn.functional as F

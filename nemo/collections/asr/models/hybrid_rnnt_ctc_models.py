@@ -164,7 +164,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                         decoding_cfg.compute_timestamps = False
             if need_change_decoding:
                 self.change_decoding_strategy(decoding_cfg, decoder_type=self.cur_decoder, verbose=False)
-
+        print("transcribe")
         return ASRTranscriptionMixin.transcribe(
             self,
             audio=audio,
@@ -249,30 +249,38 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                 cut_id = cuts[0].id
             else:
                 cut_id = f'audio_{uuid.uuid4().int}'
-        del logits, encoded_len
+        # CTC path: use vocabulary when no tokenizer (character-based).
+        vocab = getattr(self.ctc_decoder, 'vocabulary', None) or self.joint.vocabulary
         if trcfg.enable_chunking and len(hypotheses) > 1:
             merged_hypotheses = merge_chunked_hypotheses(
                 hypotheses=hypotheses,
                 encoded_len=encoded_len,
                 timestamps=trcfg.timestamps,
-                tokenizer=self.tokenizer,
+                tokenizer=getattr(self, 'tokenizer', None),
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 timestamps_type=final_timestamps_type,
-                )
+                vocabulary=vocab,
+            )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
+            del logits, encoded_len
             return [merged_hypotheses]
 
         elif trcfg.enable_chunking:
             single_hypothesis = hypotheses[0]
             if trcfg.timestamps:
                 single_hypothesis = update_timestamps(
-                    single_hypothesis, self.decoding, self.tokenizer, final_timestamps_type
+                    single_hypothesis,
+                    tokenizer=getattr(self, 'tokenizer', None),
+                    timestamps_type=final_timestamps_type,
+                    vocabulary=vocab,
                 )
             setattr(single_hypothesis, 'id', cut_id)
+            del logits, encoded_len
             return [single_hypothesis]
         else:
+            del logits, encoded_len
             return hypotheses
 
     def change_vocabulary(

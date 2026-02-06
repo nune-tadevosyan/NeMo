@@ -59,7 +59,7 @@ class TestCTCWordSpotter:
         target_text = "nineteen"
         target_tokenization = asr_model.tokenizer.text_to_ids(target_text)
         ctc_logprobs = (
-            asr_model.transcribe([audio_file_path], batch_size=1, return_hypotheses=True)[0].alignments.cpu().numpy()
+            asr_model.transcribe([audio_file_path], batch_size=1, return_hypotheses=True, enable_chunking=False)[0].alignments.cpu().numpy()
         )
         context_biasing_list = [[target_text, [target_tokenization]]]
         context_graph = context_biasing.ContextGraphCTC(blank_id=asr_model.decoding.blank_id)

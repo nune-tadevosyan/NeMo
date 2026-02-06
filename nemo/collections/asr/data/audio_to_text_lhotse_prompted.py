@@ -105,7 +105,7 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
     def __getitem__(self, cuts: CutSet) -> PromptedAudioToTextMiniBatch:
         # Load the audio's from AIS and add them to the CutSet
         audio, audio_lens, cuts = self.load_audio(cuts)
-
+        
         # Will work if batch_size is set to 1.
         if self.enable_chunking:
             # Avoid circular imports

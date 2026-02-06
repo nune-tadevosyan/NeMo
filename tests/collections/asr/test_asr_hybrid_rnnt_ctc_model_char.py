@@ -14,6 +14,7 @@
 import copy
 from typing import Optional
 
+import librosa
 import pytest
 import torch
 from lhotse import CutSet, MonoCut

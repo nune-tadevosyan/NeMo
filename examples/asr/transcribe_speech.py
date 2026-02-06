@@ -140,6 +140,7 @@ class TranscriptionConfig:
 
     # Set to True to output greedy timestamp information (only supported models) and returns full alignment hypotheses
     timestamps: Optional[bool] = None
+    enable_chunking: Optional[bool] = True
 
     # Set to True to return hypotheses instead of text from the transcribe function
     return_hypotheses: bool = False
@@ -409,6 +410,7 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
             override_cfg.text_field = cfg.gt_text_attr_name
             override_cfg.lang_field = cfg.gt_lang_attr_name
             override_cfg.timestamps = cfg.timestamps
+            override_cfg.enable_chunking = cfg.enable_chunking
             if hasattr(override_cfg, "prompt"):
                 override_cfg.prompt = parse_multitask_prompt(OmegaConf.to_container(cfg.prompt))
 
@@ -424,6 +426,7 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
                     audio=filepaths,
                     override_config=override_cfg,
                     timestamps=cfg.timestamps,
+                    enable_chunking=cfg.enable_chunking,
                 )
                 # stop timer, log time
                 timer.stop(device=device)

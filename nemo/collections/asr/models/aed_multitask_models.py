@@ -581,7 +581,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         ###  Remove this after testing
         ##
         #trcfg.prompt=[{'role': 'user', 'slots': {'timestamp': 'yes'}}]
-        import pdb; pdb.set_trace()
         return super().transcribe(audio=audio, override_config=trcfg)
 
 
@@ -1026,8 +1025,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         batch = outputs.pop('batch')
         del log_probs
         num_chunks = enc_states.shape[0]
-        import pdb; pdb.set_trace()
-        # Repear decoder_input_ids to match number of chunks
+        # Repeat decoder_input_ids to match number of chunks
         if trcfg.enable_chunking and num_chunks > decoder_input_ids.shape[0]:
             decoder_input_ids = decoder_input_ids.repeat(num_chunks, 1)
         hypotheses = self.decoding.decode_predictions_tensor(
@@ -1075,7 +1073,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 lang_id=lang_id
             )
-            # Inject the id of the cut to hypothese to later be used for separate batches
+            # Inject the id of the cut to hypotheses to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
             return [merged_hypotheses]
         if trcfg.enable_chunking:

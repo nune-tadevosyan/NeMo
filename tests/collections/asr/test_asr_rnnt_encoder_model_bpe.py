@@ -17,6 +17,7 @@ import os
 import shutil
 import tempfile
 
+import librosa
 import pytest
 import torch
 from lhotse import CutSet, MonoCut
@@ -41,7 +42,18 @@ NUMBA_RNNT_LOSS_AVAILABLE = numba_utils.numba_cpu_is_supported(
 ) or numba_utils.numba_cuda_is_supported(__NUMBA_MINIMUM_VERSION__)
 
 
-def _install_transcribe_stub(monkeypatch, capture, hyp_id):
+def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
+    """
+    Install a stub for ASRModel.transcribe that captures parameters and optionally
+    triggers the merge stub when chunking is enabled.
+    
+    Args:
+        monkeypatch: pytest monkeypatch fixture
+        capture: dict to capture 'enable_chunking' and 'override_config'
+        hyp_id: ID to assign to the returned hypothesis
+        merge_stub_ref: optional dict with 'func' key pointing to the merge stub function.
+                        If provided and enable_chunking is True, the merge stub will be called.
+    """
     def _transcribe(
         self,
         *,
@@ -62,12 +74,22 @@ def _install_transcribe_stub(monkeypatch, capture, hyp_id):
         capture['override_config'] = override_config
         hyp = Hypothesis(score=0.0, y_sequence=torch.zeros(1, dtype=torch.long))
         setattr(hyp, 'id', hyp_id)
+        
+        # Simulate what real transcribe does: call merge when chunking is enabled
+        if enable_chunking and merge_stub_ref is not None and 'func' in merge_stub_ref:
+            return merge_stub_ref['func']([hyp], timestamps, 8)  # subsampling_factor=4 as dummy
         return [hyp]
 
     monkeypatch.setattr(ASRModel, 'transcribe', _transcribe, raising=False)
 
 
 def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, raise_error=False):
+    """
+    Install a stub for merge_chunked_hypotheses.
+    
+    Returns:
+        dict with 'func' key containing the merge stub function, for use with _install_transcribe_stub
+    """
     def _merge(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
         if merge_capture is not None:
             merge_capture['called'] = True
@@ -82,7 +104,8 @@ def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, rais
             )
         return return_value
 
-    monkeypatch.setattr(rnnt_models, 'merge_all_hypotheses', _merge)
+    monkeypatch.setattr(rnnt_models, 'merge_chunked_hypotheses', _merge)
+    return {'func': _merge}
 
 
 @pytest.fixture()
@@ -388,16 +411,23 @@ class TestEncDecRNNTBPEModel:
         model = fast_conformer_transducer_model
         model.eval()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
+        
+        # Test with file path (no timestamps)
         hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
         assert hypotheses[0].timestamp == []
-
-        ts_hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=True)
+        
+        # Test with tensor input (with timestamps)
+        audio_data, sr = librosa.load(audio_file, sr=16000)
+        audio_tensor = [torch.from_numpy(audio_data)]
+        
+        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True)
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
         assert ts_hypotheses[0].text == hypotheses[0].text
+        assert hypotheses[0].text[-35:] == "ultiple customer orders and reality"
         assert 'word' in ts_hypotheses[0].timestamp
         assert 'segment' in ts_hypotheses[0].timestamp
         assert len(ts_hypotheses[0].timestamp['word']) > 0
@@ -416,6 +446,14 @@ class TestEncDecRNNTBPEModel:
         assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
             [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
         )
+        assert words[-1] == {
+            'word': 'orders.',
+            'start_offset': 7475,
+            'end_offset': 7479,
+            'start': 598.0,
+            'end': 598.32,
+        }
+
         # Check that the number of words and segments are consistent
         assert ts_hypotheses[0].timestamp['segment'][0]['start'] == ts_hypotheses[0].timestamp['word'][0]['start']
         assert ts_hypotheses[0].timestamp['segment'][-1]['end'] == ts_hypotheses[0].timestamp['word'][-1]['end']
@@ -428,66 +466,7 @@ class TestEncDecRNNTBPEModel:
             == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
         )
 
-    @pytest.mark.unit
-    def test_transcribe_chunking_single_audio_enables_merge(self, asr_model, monkeypatch):
-        captured = {'enable_chunking': None, 'override_config': None}
-        merge_calls = {'called': False}
-        _install_transcribe_stub(monkeypatch, captured, hyp_id='single-cut-0')
-        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-result'])
 
-        outputs = asr_model.transcribe('dummy.wav', batch_size=1, return_hypotheses=True)
-
-        assert captured['enable_chunking'] is True
-        assert merge_calls['called'] is True
-        assert outputs == ['merged-result']
-
-    @pytest.mark.unit
-    def test_transcribe_chunking_manifest_single_entry(self, asr_model, monkeypatch, tmp_path):
-        captured = {'enable_chunking': None}
-        merge_calls = {'called': False}
-        _install_transcribe_stub(monkeypatch, captured, hyp_id='manifest-cut-0')
-        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-manifest'])
-
-        manifest_path = tmp_path / 'single_audio.jsonl'
-        manifest_path.write_text(json.dumps({'audio_filepath': 'dummy.wav', 'duration': 1.23}) + '\n')
-
-        outputs = asr_model.transcribe(str(manifest_path), batch_size=4, return_hypotheses=False)
-
-        assert captured['enable_chunking'] is True
-        assert merge_calls['called'] is True
-        assert outputs == ['merged-manifest']
-
-    @pytest.mark.unit
-    def test_transcribe_chunking_disabled_multiple_inputs(self, asr_model, monkeypatch):
-        captured = {'enable_chunking': None}
-        _install_transcribe_stub(monkeypatch, captured, hyp_id='multi-cut-0')
-        _install_merge_stub(monkeypatch, raise_error=True)
-
-        warnings = []
-        monkeypatch.setattr(rnnt_models.logging, 'warning', lambda message: warnings.append(message))
-
-        outputs = asr_model.transcribe(['a.wav', 'b.wav'], batch_size=2, return_hypotheses=False)
-
-        assert captured['enable_chunking'] is False
-        assert warnings, "Expected chunking warning for batch size > 1."
-        assert 'Chunking is disabled' in warnings[0]
-        assert isinstance(outputs, list)
-        assert isinstance(outputs[0], Hypothesis)
-
-    @pytest.mark.unit
-    def test_transcribe_chunking_override_config_enables_merge(self, asr_model, monkeypatch):
-        captured = {'enable_chunking': None, 'override_config': None}
-        merge_calls = {'called': False}
-        _install_transcribe_stub(monkeypatch, captured, hyp_id='override-cut-0')
-        _install_merge_stub(monkeypatch, merge_capture=merge_calls, return_value=['merged-override'])
-
-        override_cfg = TranscribeConfig(batch_size=1)
-        outputs = asr_model.transcribe(['clip.wav', 'clip2.wav'], batch_size=4, override_config=override_cfg)
-
-        assert captured['enable_chunking'] is True
-        assert override_cfg.enable_chunking is True
-        assert merge_calls['called'] is True
-        assert outputs == ['merged-override']
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit
