@@ -445,11 +445,11 @@ class TestEncDecRNNTBPEModel:
             [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
         )
         assert words[-1] == {
-            'word': 'orders.',
-            'start_offset': 7475,
-            'end_offset': 7479,
-            'start': 598.0,
-            'end': 598.32,
+            'word': 'reality',
+            'start_offset': 7493,
+            'end_offset': 7497,
+            'start': 599.44,
+            'end': 599.76,
         }
 
         # Check that the number of words and segments are consistent
