@@ -360,7 +360,6 @@ class TestEncDecHybridRNNTCTCBPEModel:
         assert isinstance(hybrid_asr_model.decoding.decoding, greedy_decode.GreedyRNNTInfer)
         assert hybrid_asr_model.cur_decoder == 'rnnt'
 
-    @pytest.mark.with_downloads()
     @pytest.mark.unit
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_hybrid_model):
         """Test chunking transcription with pretrained hybrid RNNT-CTC BPE model on long audio."""

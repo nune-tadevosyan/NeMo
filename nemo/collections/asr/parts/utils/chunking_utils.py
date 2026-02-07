@@ -420,13 +420,12 @@ def update_timestamps(hypotheses, tokenizer=None, timestamps_type=None, lang_id=
     # Create encoded_char_offsets for word/segment generation
     char_timestamps = hypotheses.timestamp['char']
     encoded_char_offsets = []
-
     for char_offset in char_timestamps:
         enc_char_offset = char_offset.copy()
         if lang_id:
-            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']], lang_id=lang_id)
+            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']] if isinstance(enc_char_offset['token_id'], int) else enc_char_offset['token_id'], lang_id=lang_id)
         else:
-            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']])
+            enc_char_offset['char'] = tokenizer.ids_to_tokens([enc_char_offset['token_id']] if isinstance(enc_char_offset['token_id'], int) else enc_char_offset['token_id'])
         
         char_offset.pop('token_id', None)
         char_offset.pop('token', None)
