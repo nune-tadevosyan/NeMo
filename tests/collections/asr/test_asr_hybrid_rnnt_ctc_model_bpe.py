@@ -366,7 +366,7 @@ class TestEncDecHybridRNNTCTCBPEModel:
         model = fast_conformer_hybrid_model
         model.change_decoding_strategy(decoder_type='ctc')
         model.eval()
-        audio_file = "/home/TestData/TestData/asr/longform/earnings22/sample_4469669.wav"
+        audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         # Test with file path (no timestamps)
         hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False,enable_chunking=True)
         assert len(hypotheses) == 1
