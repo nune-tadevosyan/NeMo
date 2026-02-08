@@ -747,6 +747,8 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 # cudaMallocHost()-allocated tensor to be floating
                 # around. Were that to be the case, then the pinned
                 # memory cache would always miss.
+                if trcfg.enable_chunking:
+                    hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
                 hypotheses[idx].y_sequence = logits_cpu[idx, : logits_len[idx]].clone()
                 if hypotheses[idx].alignments is None:
                     hypotheses[idx].alignments = hypotheses[idx].y_sequence
@@ -773,6 +775,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 timestamps_type=final_timestamps_type,
                 vocabulary=getattr(self.decoder, 'vocabulary', None),
+                return_hypotheses=trcfg.return_hypotheses,
             )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)

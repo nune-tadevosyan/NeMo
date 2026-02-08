@@ -257,6 +257,36 @@ def chunk_audio_sample(
     return stacked_chunks, stacked_lengths
 
 
+def _get_token_ids(hypothesis, return_hypotheses, timestamps, lang_id, tokenizer):
+    """
+    Extract token IDs from a hypothesis for merging.
+
+    When return_hypotheses is True, y_sequence may contain logits (2D float tensor)
+    rather than token IDs. In that case, token_sequence (saved before logits overwrite)
+    holds the actual integer token IDs.
+
+    Args:
+        hypothesis: A Hypothesis object.
+        return_hypotheses: Whether return_hypotheses mode is active.
+        timestamps: Whether timestamps are enabled.
+        lang_id: Optional language id for multilingual tokenizers.
+        tokenizer: Tokenizer for text_to_ids fallback.
+
+    Returns:
+        List[int]: Token IDs suitable for merging.
+    """
+    if timestamps and lang_id is None:
+        # Timestamps path extracts token IDs from char timestamps; handled by caller.
+        return None
+    if lang_id is not None:
+        return tokenizer.text_to_ids(hypothesis.text, lang_id=lang_id)
+    # When return_hypotheses is True, y_sequence contains logits; use token_sequence instead.
+    if return_hypotheses and hasattr(hypothesis, 'token_sequence') and hypothesis.token_sequence is not None:
+        seq = hypothesis.token_sequence
+        return seq.tolist() if isinstance(seq, torch.Tensor) else list(seq)
+    return hypothesis.y_sequence.tolist()
+
+
 def merge_chunked_hypotheses(
     hypotheses,
     encoded_len,
@@ -267,6 +297,7 @@ def merge_chunked_hypotheses(
     timestamps_type=None,
     lang_id=None,
     vocabulary=None,
+    return_hypotheses=False,
 ):
     """
     Merges hypotheses from parallel chunks into a single hypothesis with proper text,
@@ -283,6 +314,7 @@ def merge_chunked_hypotheses(
             Used when tokenizer is None to build an internal adapter.
         timestamps_type: Types of timestamps to include.
         lang_id: Optional language id for multilingual tokenizers.
+        return_hypotheses: Whether return_hypotheses mode is active (y_sequence may contain logits).
 
     Returns:
         Hypothesis: A single merged hypothesis with combined text, tokens, and timestamps
@@ -309,22 +341,18 @@ def merge_chunked_hypotheses(
                 token = tokenizer.ids_to_tokens(token_id)
                 entry['token'] = token[1] if len(token) > 1 else token[0]
             return entry
-
         if hypotheses[0].timestamp['char']:
             merged_tokens = []
             for char in hypotheses[0].timestamp['char']:
                 char = ensure_char_token(char)
                 merged_tokens.append(char['token_id'])
         else:
-            if hypotheses[0].text != '' :
-                logging.warning(
-                    "Cannot provide reliable timestamps for the current audio file."
-                )
-            merged_tokens = hypotheses[0].y_sequence.tolist()
-    elif lang_id is not None:
-        merged_tokens = tokenizer.text_to_ids(hypotheses[0].text,lang_id=lang_id)
+            if hypotheses[0].text != '':
+                logging.warning("Cannot provide reliable timestamps for the current audio file.")
+            merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer)
     else:
-        merged_tokens = hypotheses[0].y_sequence.tolist()
+        merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer)
+
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
     for i in range(1, len(hypotheses)):
@@ -335,15 +363,11 @@ def merge_chunked_hypotheses(
                     char = ensure_char_token(char)
                     data.append(char['token_id'])
             else:
-                if hypotheses[0].text != '' :
-                    logging.warning(
-                        "Cannot provide reliable timestamps for the current audio file."
-                    )
-                data = hypotheses[i].y_sequence.tolist()
-        elif lang_id is not None:
-            data = tokenizer.text_to_ids(hypotheses[i].text,lang_id=lang_id)
+                if hypotheses[0].text != '':
+                    logging.warning("Cannot provide reliable timestamps for the current audio file.")
+                data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer)
         else:
-            data = hypotheses[i].y_sequence.tolist()
+            data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer)
         merged_tokens = lcs_alignment_merge_buffer(
             buffer=merged_tokens,
             data=data[: int(delay * 0.6)],  # only approximately 60% of the frames have corresponding tokens
@@ -357,13 +381,29 @@ def merge_chunked_hypotheses(
 
     # Convert merged tokens to text
     # Use ids_to_text which handles token ID offsets internally and works with AggregateTokenizer
+    # CTC models include blank token id (e.g. vocab_size) in y_sequence; filter it out so tokenizer decode does not fail
+    vocab_size = None
+    if hasattr(tokenizer, 'vocab_size'):
+        vocab_size = tokenizer.vocab_size
+    elif hasattr(tokenizer, 'vocabulary'):
+        vocab_size = len(tokenizer.vocabulary)
+    if vocab_size is not None:
+        merged_tokens = [int(t) for t in merged_tokens if isinstance(t, (int, float)) and 0 <= int(t) < vocab_size]
     final_text = tokenizer.ids_to_text(merged_tokens)
     merged_hypotheses = Hypothesis(
         score=0.0,
         y_sequence=torch.tensor([]),
         timestamp=([] if not timestamps else {'word': [], 'segment': []}),
     )
-    merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
+
+    # When return_hypotheses is True, y_sequence contains logits (2D: [T, V]).
+    if return_hypotheses and hasattr(hypotheses[0], 'token_sequence') and hypotheses[0].token_sequence is not None:
+        merged_hypotheses.y_sequence = torch.cat([hyp.y_sequence for hyp in hypotheses], dim=0)
+        merged_hypotheses.token_sequence = torch.tensor(merged_tokens, dtype=torch.long)
+    else:
+        merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
+
+    merged_hypotheses = join_confidence_values(merged_hypotheses, hypotheses)
     merged_hypotheses.text = final_text
     # Set score to minimum of all chunk scores, length to sum of all chunk lengths
     merged_hypotheses.score = min(h.score for h in hypotheses)
@@ -374,7 +414,7 @@ def merge_chunked_hypotheses(
             for i, x in enumerate(encoded_len.tolist(), start=1)
         ]
     if timestamps and lang_id is None:
-        
+
         merged_hypotheses = join_char_timestamp_add_word_and_segment_level_timestamps(
             merged_hypotheses,
             hypotheses,
@@ -1019,7 +1059,7 @@ def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_
 
 
 def merge_hypotheses_of_same_audio(
-    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600,
+    hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, return_hypotheses=False,
 ):
     """
     Merge hypotheses from the same audio source into a single hypothesis.
@@ -1031,6 +1071,7 @@ def merge_hypotheses_of_same_audio(
         timestamps: True if timestamps generation is enabled
         subsampling_factor: Subsampling factor of the encoder
         chunk_duration_seconds: Duration of each chunk in seconds (default: 3600)
+        return_hypotheses: Whether return_hypotheses mode is active (y_sequence may contain logits).
 
     Returns:
         Hypothesis: Single merged hypothesis
@@ -1040,14 +1081,42 @@ def merge_hypotheses_of_same_audio(
         y_sequence=torch.tensor([]),
         timestamp=([] if not timestamps else {}),
     )
-    
-    # Filter valid y_sequences (1D tensors with at least one element)
-    valid_y_sequences = [
-        h.y_sequence for h in hypotheses_list 
-        if h.y_sequence.dim() == 1 and h.y_sequence.size(0) > 0
-    ]
-    if valid_y_sequences:
-        merged_hypothesis.y_sequence = torch.cat(valid_y_sequences)
+
+    # When return_hypotheses is True, y_sequence holds logits (2D: [T, V]) and
+    # token_sequence holds the actual integer token IDs (1D).
+    has_logits = (
+        return_hypotheses
+        and hasattr(hypotheses_list[0], 'token_sequence')
+        and hypotheses_list[0].token_sequence is not None
+    )
+
+    if has_logits:
+        # Concatenate logits from all chunks
+        valid_logits = [
+            h.y_sequence for h in hypotheses_list
+            if isinstance(h.y_sequence, torch.Tensor) and h.y_sequence.numel() > 0
+        ]
+        if valid_logits:
+            merged_hypothesis.y_sequence = torch.cat(valid_logits, dim=0)
+
+        # Concatenate token_sequence from all chunks
+        valid_token_sequences = [
+            h.token_sequence if isinstance(h.token_sequence, torch.Tensor) else torch.tensor(h.token_sequence)
+            for h in hypotheses_list
+            if h.token_sequence is not None
+               and (isinstance(h.token_sequence, torch.Tensor) and h.token_sequence.numel() > 0
+                    or not isinstance(h.token_sequence, torch.Tensor) and len(h.token_sequence) > 0)
+        ]
+        if valid_token_sequences:
+            merged_hypothesis.token_sequence = torch.cat(valid_token_sequences)
+    else:
+        # Standard path: y_sequence holds integer token IDs (1D)
+        valid_y_sequences = [
+            h.y_sequence for h in hypotheses_list
+            if isinstance(h.y_sequence, torch.Tensor) and h.y_sequence.dim() == 1 and h.y_sequence.size(0) > 0
+        ]
+        if valid_y_sequences:
+            merged_hypothesis.y_sequence = torch.cat(valid_y_sequences)
 
     # Merge confidence values from all hypotheses
     merged_hypothesis = join_confidence_values(merged_hypothesis, hypotheses_list)

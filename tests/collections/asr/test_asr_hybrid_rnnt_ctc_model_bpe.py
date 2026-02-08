@@ -364,11 +364,11 @@ class TestEncDecHybridRNNTCTCBPEModel:
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_hybrid_model):
         """Test chunking transcription with pretrained hybrid RNNT-CTC BPE model on long audio."""
         model = fast_conformer_hybrid_model
+        model.change_decoding_strategy(decoder_type='ctc')
         model.eval()
-        audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
-
+        audio_file = "/home/TestData/TestData/asr/longform/earnings22/sample_4469669.wav"
         # Test with file path (no timestamps)
-        hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
+        hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False,enable_chunking=True)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
@@ -377,8 +377,8 @@ class TestEncDecHybridRNNTCTCBPEModel:
         # Test with tensor input (with timestamps)
         audio_data, sr = librosa.load(audio_file, sr=16000)
         audio_tensor = [torch.from_numpy(audio_data)]
-
-        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True)
+        model.change_decoding_strategy(decoder_type='ctc')
+        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, timestamps=True, enable_chunking=True)
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
         assert ts_hypotheses[0].text == hypotheses[0].text
@@ -387,16 +387,16 @@ class TestEncDecHybridRNNTCTCBPEModel:
         assert len(ts_hypotheses[0].timestamp['word']) > 0
         assert len(ts_hypotheses[0].timestamp['segment']) > 0
         # Monotonicity and validity of word offsets and times
-        assert ts_hypotheses[0].text[-25:] == 'multiple customer orders.'
+        assert ts_hypotheses[0].text[-25:] == 'customer orders relative.'
         words = ts_hypotheses[0].timestamp['word']
         starts = [w['start'] for w in words]
         ends = [w['end'] for w in words]
-        assert ts_hypotheses[0].timestamp['word'][-1] == {
-            'word': 'orders.',
-            'start_offset': 7475,
-            'end_offset': 7479,
-            'start': 598.0,
-            'end': 598.32,
+        assert words[-1] == {
+            'word': 'relative.',
+            'start_offset': 7479,
+            'end_offset': 7493,
+            'start': 598.32,
+            'end': 599.44,
         }
         assert all(s <= e for s, e in zip(starts, ends))
         assert all(x <= y for x, y in zip(starts, starts[1:]))

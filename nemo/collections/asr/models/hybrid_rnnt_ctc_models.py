@@ -137,7 +137,6 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
             * A list of greedy transcript texts / Hypothesis
             * An optional list of beam search transcript texts / Hypothesis / NBestHypothesis.
         """
-
         if timestamps is not None:
             if self.cur_decoder not in ["ctc", "rnnt"]:
                 raise ValueError(
@@ -210,30 +209,31 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
     ) -> Union[List['Hypothesis'], List[List['Hypothesis']]]:
         if self.cur_decoder == "rnnt":
             return super()._transcribe_output_processing(outputs, trcfg)
-
         # CTC Path
         logits = outputs.pop('logits')
         encoded_len = outputs.pop('encoded_len')
         cuts = outputs.pop('cuts', None)
         if trcfg.timestamps and trcfg.enable_chunking:
-            final_timestamps_type = self.cfg.decoding.rnnt_timestamp_type
-            self.decoding.cfg.rnnt_timestamp_type = 'char'
+            final_timestamps_type = self.ctc_decoding.cfg.ctc_timestamp_type
+            self.ctc_decoding.cfg.ctc_timestamp_type = 'char'
         else:
             final_timestamps_type = None
         hypotheses = self.ctc_decoding.ctc_decoder_predictions_tensor(
             logits,
             encoded_len,
             return_hypotheses=trcfg.return_hypotheses,
+            return_token_ids=trcfg.enable_chunking,
         )
         logits = logits.cpu()
-
         if trcfg.return_hypotheses:
             # dump log probs per file
             for idx in range(logits.shape[0]):
+                if trcfg.enable_chunking:
+                    hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
+                hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
                 hypotheses[idx].y_sequence = logits[idx][: encoded_len[idx]]
                 if hypotheses[idx].alignments is None:
                     hypotheses[idx].alignments = hypotheses[idx].y_sequence
-
         # DEPRECATED?
         # if logprobs:
         #     for logit, elen in zip(logits, encoded_len):
@@ -259,7 +259,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
                 timestamps_type=final_timestamps_type,
-                vocabulary=vocab,
+                return_hypotheses=trcfg.return_hypotheses,
             )
             # Inject the id of the cut to hypothesis to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
