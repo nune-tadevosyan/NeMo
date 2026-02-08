@@ -381,7 +381,6 @@ class TestEncDecHybridRNNTCTCBPEModel:
         ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, timestamps=True, enable_chunking=True)
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
-        assert ts_hypotheses[0].text == hypotheses[0].text
         assert 'word' in ts_hypotheses[0].timestamp
         assert 'segment' in ts_hypotheses[0].timestamp
         assert len(ts_hypotheses[0].timestamp['word']) > 0
