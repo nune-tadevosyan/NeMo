@@ -470,7 +470,6 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
             # extract the hypotheses
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
-
         if isinstance(hypotheses_list[0], NBestHypotheses):
             if self.cfg.strategy == 'wfst':
                 all_hypotheses = [hyp.n_best_hypotheses for hyp in hypotheses_list]
@@ -579,9 +578,19 @@ class AbstractCTCDecoding(ConfidenceMixin):
             else:
                 if predictions_len is not None:
                     prediction = prediction[:predictions_len]
-                decoded_prediction = prediction[prediction != self.blank_id].tolist()
+                if isinstance(prediction, torch.Tensor):
+                    decoded_prediction = prediction[prediction != self.blank_id].tolist()
+                else:
+                    decoded_prediction = [p for p in prediction if p != self.blank_id]
                 token_lengths = [1] * len(decoded_prediction)  # preserve number of repetitions per token
                 token_repetitions = [1] * len(decoded_prediction)  # preserve number of repetitions per token
+
+            # Update y_sequence to the final decoded prediction
+            hypotheses_list[ind].y_sequence = (
+                torch.tensor(decoded_prediction, dtype=torch.long)
+                if decoded_prediction
+                else torch.tensor([], dtype=torch.long)
+            )
 
             # De-tokenize the integer tokens; if not computing timestamps
             if self.compute_timestamps is True:
@@ -698,6 +707,8 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 A list of integers that represents the number of repetitions per token.
             timestamp_type: A str value that represents the type of time stamp calculated.
                 Can be one of "char", "word" "segment" or "all"
+            return_token_ids: If True, each char/subword offset will include a "token_id" field
+                with the corresponding token id(s).
 
         Returns:
             A Hypothesis object with a modified `timestep` value, which is now a dictionary containing

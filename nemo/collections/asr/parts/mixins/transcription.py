@@ -191,7 +191,7 @@ class TranscriptionTensorDataset(Dataset):
     def __getitem__(self, index):
         if index >= self.length:
             raise IndexError(f"Index {index} out of range for dataset of size {self.length}")
-
+        
         return self.get_item(index)
 
     def __len__(self):
@@ -237,7 +237,6 @@ class TranscriptionTensorDataset(Dataset):
         samples = self._pad_audio(samples)
         # Calculate seq length
         seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
-
         # Typically NeMo ASR models expect the mini-batch to be a 4-tuple of (audio, audio_len, text, text_len).
         # For inference, we set text and text_len to None to not disrupt the shape of the tuple.
         return samples, seq_len, None, None
@@ -270,7 +269,6 @@ def _speech_collate_fn_with_chunking(
 
     # First, use the standard collate function
     audio, audio_lens, text, text_lens = _speech_collate_fn(batch, pad_id=pad_id)
-
     audio, audio_lens = chunk_audio_sample(
         audio=audio,
         audio_lens=audio_lens,
@@ -372,7 +370,7 @@ class TranscriptionMixin(ABC):
             batch_size: (int) batch size to use during inference.
                 Bigger will result in better throughput performance but would use more memory.
             return_hypotheses: (bool) Either return hypotheses or text
-                With hypotheses can do some postprocessing like getting timestamp or rescoring
+                With hypotheses can do some postprocessing like getting timestamp or rescoring.
             num_workers: (int) number of workers for DataLoader
             channel_selector (int | Iterable[int] | str): select a single channel or a subset of channels from
                 multi-channel audio. If set to `'average'`, it performs averaging across channels. Disabled if set
