@@ -1065,8 +1065,6 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
 
 
     # Test with timestamps
-
-    import pdb; pdb.set_trace()
     hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=1)
     hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=1)
 
