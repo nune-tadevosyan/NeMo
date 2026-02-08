@@ -578,19 +578,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
             else:
                 if predictions_len is not None:
                     prediction = prediction[:predictions_len]
-                if isinstance(prediction, torch.Tensor):
-                    decoded_prediction = prediction[prediction != self.blank_id].tolist()
-                else:
-                    decoded_prediction = [p for p in prediction if p != self.blank_id]
+                decoded_prediction = prediction[prediction != self.blank_id].tolist()
                 token_lengths = [1] * len(decoded_prediction)  # preserve number of repetitions per token
                 token_repetitions = [1] * len(decoded_prediction)  # preserve number of repetitions per token
-
-            # Update y_sequence to the final decoded prediction
-            hypotheses_list[ind].y_sequence = (
-                torch.tensor(decoded_prediction, dtype=torch.long)
-                if decoded_prediction
-                else torch.tensor([], dtype=torch.long)
-            )
 
             # De-tokenize the integer tokens; if not computing timestamps
             if self.compute_timestamps is True:
