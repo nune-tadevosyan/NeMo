@@ -437,7 +437,7 @@ class TestEncDecCTCModel:
         # Use RNNT decoder so test is deterministic regardless of test order. The session-scoped
         # fixture can be left in CTC mode by test_timestamps_with_transcribe_hybrid_ctc_head.
         model.eval()
-        audio_file = "/home/TestData/TestData/asr/longform/earnings22/sample_4469669.wav"
+        audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         # Test with file path (no timestamps)
         hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False,enable_chunking=False)
         assert len(hypotheses) == 1
