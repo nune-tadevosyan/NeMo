@@ -1315,7 +1315,5 @@ def merge_hypotheses_of_same_audio(
             merged_hypothesis.timestamp['word'] = hypotheses_list[0].timestamp['word']
         if hypotheses_list[0].timestamp.get('segment', None):
             merged_hypothesis.timestamp['segment'] = hypotheses_list[0].timestamp['segment']
-    else:
-        pass
-        # merged_hypothesis.pop('timestamp', None)
+
     return merged_hypothesis
