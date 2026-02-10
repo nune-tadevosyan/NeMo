@@ -445,6 +445,15 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         self.decoder_layers = torch.nn.Sequential(
             torch.nn.Conv1d(self._feat_in, self._num_classes, kernel_size=1, bias=True)
         )
+        # Two layers of 2x temporal upsampling -> 4x total (T -> 4*T)
+        self.upscaler = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(
+                self._feat_in, self._feat_in, kernel_size=2, stride=2
+            ),
+            torch.nn.ConvTranspose1d(
+                self._feat_in, self._feat_in, kernel_size=2, stride=2
+            ),
+        )
         self.apply(lambda x: init_weights(x, mode=init_mode))
 
         accepted_adapters = [adapter_utils.LINEAR_ADAPTER_CLASSPATH]
@@ -460,6 +469,9 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
             encoder_output = encoder_output.transpose(1, 2)  # [B, T, C]
             encoder_output = self.forward_enabled_adapters(encoder_output)
             encoder_output = encoder_output.transpose(1, 2)  # [B, C, T]
+
+        # Upsample time by 4x (two layers of 2x each): [B, feat_in, T] -> [B, feat_in, 4*T]
+        encoder_output = self.upscaler(encoder_output)
 
         if self.temperature != 1.0:
             return torch.nn.functional.log_softmax(
