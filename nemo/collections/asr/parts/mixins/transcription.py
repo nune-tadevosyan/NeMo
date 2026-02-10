@@ -29,10 +29,10 @@ from tqdm import tqdm
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment, ChannelSelectorType
 from nemo.collections.asr.parts.utils import manifest_utils
+from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging, logging_mode
-from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses
 
 TranscriptionReturnType = Union[List[str], List[Hypothesis], Tuple[List[str]], Tuple[List[Hypothesis]]]
 GenericTranscriptionType = Union[List[Any], List[List[Any]], Tuple[Any], Tuple[List[Any]], Dict[str, List[Any]]]
@@ -128,9 +128,7 @@ def resolve_chunking(
     return False
 
 
-def _is_single_audio(
-    audio: Union[str, List[str], Tuple[str, ...], np.ndarray, torch.Tensor, DataLoader]
-) -> bool:
+def _is_single_audio(audio: Union[str, List[str], Tuple[str, ...], np.ndarray, torch.Tensor, DataLoader]) -> bool:
     """Check if the audio input represents a single audio sample."""
     # String input (file path or manifest)
     if isinstance(audio, str):
@@ -191,7 +189,7 @@ class TranscriptionTensorDataset(Dataset):
     def __getitem__(self, index):
         if index >= self.length:
             raise IndexError(f"Index {index} out of range for dataset of size {self.length}")
-        
+
         return self.get_item(index)
 
     def __len__(self):
@@ -250,16 +248,16 @@ def _speech_collate_fn_with_chunking(
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Collate function for tensor datasets with chunking support.
-    
+
     This function collates audio samples and applies chunking to split long audio
     into smaller overlapping segments for more efficient processing.
-    
+
     Args:
         batch: List of tuples (audio, audio_len, text, text_len)
         pad_id: Padding ID for text sequences
         sample_rate: Audio sample rate in Hz
         chunk_range: [min_seconds, max_seconds] for chunk size. If None, uses default [240, 300].
-    
+
     Returns:
         Tuple of (audio, audio_lens, text, text_lens) with chunked audio
     """
@@ -310,26 +308,26 @@ class TranscriptionMixin(ABC):
     def _is_chunking_compatible_decoding(self) -> bool:
         """
         Check if the current decoding strategy is compatible with chunking.
-        
+
         Beam search with `return_best_hypothesis=False` returns multiple hypotheses per chunk,
         which is incompatible with the current chunking merge implementation that expects
         a single hypothesis per chunk.
-        
+
         Returns:
             bool: True if decoding is compatible with chunking, False otherwise.
         """
         # Check if the model has a decoding attribute (RNNT/TDT models)
         if not hasattr(self, 'decoding'):
             return True
-        
+
         # Check if decoding has an inner decoder (AbstractRNNTDecoding stores decoder as self.decoding)
         inner_decoder = getattr(self.decoding, 'decoding', None)
         if inner_decoder is None:
             return True
-        
+
         # Check if the inner decoder has return_best_hypothesis attribute (beam decoders have this)
         return_best_hypothesis = getattr(inner_decoder, 'return_best_hypothesis', True)
-        
+
         if not return_best_hypothesis:
             logging.warning(
                 "Chunking is not compatible with beam search when `return_best_hypothesis=False`. "
@@ -338,7 +336,7 @@ class TranscriptionMixin(ABC):
                 "Set `decoding.beam.return_best_hypothesis=True` to enable chunking with beam search."
             )
             return False
-        
+
         return True
 
     @torch.inference_mode()
@@ -439,11 +437,14 @@ class TranscriptionMixin(ABC):
         if type(transcribe_cfg).__name__ in ('ClassificationInferConfig', 'RegressionInferConfig'):
             transcribe_cfg.enable_chunking = False
         else:
-            transcribe_cfg.enable_chunking = resolve_chunking(
-                audio=audio,
-                enable_chunking=transcribe_cfg.enable_chunking,
-                batch_size=transcribe_cfg.batch_size,
-            ) and self._is_chunking_compatible_decoding()
+            transcribe_cfg.enable_chunking = (
+                resolve_chunking(
+                    audio=audio,
+                    enable_chunking=transcribe_cfg.enable_chunking,
+                    batch_size=transcribe_cfg.batch_size,
+                )
+                and self._is_chunking_compatible_decoding()
+            )
         # Hold the results here
         results = None  # type: GenericTranscriptionType
         try:
@@ -499,7 +500,9 @@ class TranscriptionMixin(ABC):
             results = merge_all_hypotheses(
                 hypotheses_list=results,
                 timestamps=(override_config.timestamps if override_config is not None else timestamps),
-                subsampling_factor=self.encoder.subsampling_factor if hasattr(self.encoder, 'subsampling_factor') else 8,
+                subsampling_factor=(
+                    self.encoder.subsampling_factor if hasattr(self.encoder, 'subsampling_factor') else 8
+                ),
             )
         return results
 
@@ -554,7 +557,7 @@ class TranscriptionMixin(ABC):
                     # Run forward pass
                     model_outputs = self._transcribe_forward(test_batch, transcribe_cfg)
                     processed_outputs = self._transcribe_output_processing(model_outputs, transcribe_cfg)
-                    
+
                     # clear up memory
                     del test_batch, model_outputs
 

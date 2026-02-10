@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 import torch
 
-import json
-
+from nemo.collections.asr.parts.mixins.transcription import resolve_chunking
 from nemo.collections.asr.parts.utils.chunking_utils import (
     chunk_audio_sample,
     chunk_waveform,
@@ -26,7 +27,6 @@ from nemo.collections.asr.parts.utils.chunking_utils import (
     merge_hypotheses_of_same_audio,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
-from nemo.collections.asr.parts.mixins.transcription import resolve_chunking
 
 
 def _make_char(char, token_id, start_off, end_off, token=None):

@@ -41,10 +41,7 @@ from nemo.collections.asr.parts.mixins import (
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecoding, RNNTDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
-from nemo.collections.asr.parts.utils.chunking_utils import (
-    merge_chunked_hypotheses,
-    update_timestamps,
-)
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_outputs
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
@@ -294,7 +291,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             Returns a tuple of 2 items -
             * A list of greedy transcript texts / Hypothesis
             * An optional list of beam search transcript texts / Hypothesis / NBestHypothesis.
-        """    
+        """
         timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
         if timestamps is not None:
             need_change_decoding = False
@@ -336,7 +333,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             partial_hypothesis=partial_hypothesis,
             enable_chunking=enable_chunking,
         )
-        
 
     def change_vocabulary(self, new_vocabulary: List[str], decoding_cfg: Optional[DictConfig] = None):
         """
@@ -552,7 +548,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             batch_sampler = get_semi_sorted_batch_sampler(self, dataset, config)
             config['batch_size'] = None
             config['drop_last'] = False
-            shuffle = False     
+            shuffle = False
 
         return torch.utils.data.DataLoader(
             dataset=dataset,
@@ -980,7 +976,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             encoded_len,
             return_hypotheses=trcfg.return_hypotheses,
             partial_hypotheses=trcfg.partial_hypothesis,
-            return_token_ids=trcfg.enable_chunking, #If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
+            return_token_ids=trcfg.enable_chunking,  # If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
         )
         # cleanup memory
         del encoded
@@ -1021,7 +1017,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             return [single_hypothesis]
         else:
             return hyp
-
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
         """

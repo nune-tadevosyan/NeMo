@@ -35,13 +35,13 @@ from nemo.collections.asr.parts.mixins.transcription import GenericTranscription
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecoding, CTCDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_outputs
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.common.parts.preprocessing.parsers import make_parser
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.mixins import AccessMixin
-from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType
 from nemo.utils import logging
 
@@ -308,7 +308,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         # Automatically inject args from model config to dataloader config
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='sample_rate')
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='labels')
-    
+
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
             config['use_lhotse'] = True
@@ -622,7 +622,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             )
         else:
             log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
-        
+
         transcribed_texts = self.wer.decoding.ctc_decoder_predictions_tensor(
             decoder_outputs=log_probs,
             decoder_lengths=encoded_len,
@@ -729,7 +729,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             logits,
             decoder_lengths=logits_len,
             return_hypotheses=trcfg.return_hypotheses,
-            return_token_ids=trcfg.enable_chunking, #If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
+            return_token_ids=trcfg.enable_chunking,  # If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
         )
         if trcfg.return_hypotheses:
             if logits.is_cuda:
@@ -794,7 +794,6 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             return [single_hypothesis]
         else:
             return hypotheses
-
 
     def get_best_hyptheses(self, all_hypothesis: list[list[Hypothesis]]):
         return [hyp[0] for hyp in all_hypothesis]

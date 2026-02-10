@@ -947,7 +947,9 @@ def get_batch_variables(
                 if has_hypotheses:
                     hypotheses = audio
                 else:
-                    hypotheses = model.transcribe(audio, return_hypotheses=True, batch_size=batch_size, enable_chunking=False)
+                    hypotheses = model.transcribe(
+                        audio, return_hypotheses=True, batch_size=batch_size, enable_chunking=False
+                    )
         else:
             assert isinstance(audio, list) or isinstance(
                 audio, str

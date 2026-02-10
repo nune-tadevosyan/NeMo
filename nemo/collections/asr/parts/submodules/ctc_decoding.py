@@ -486,7 +486,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
                     if self.compute_timestamps is True:
                         timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
                         for hyp_idx in range(len(decoded_hyps)):
-                            decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(decoded_hyps[hyp_idx], timestamp_type, return_token_ids)
+                            decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(
+                                decoded_hyps[hyp_idx], timestamp_type, return_token_ids
+                            )
 
                     all_hypotheses.append(decoded_hyps)
 
@@ -516,7 +518,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
                             hyp.text = hyp.text[:2]
                     timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
                     for hyp_idx in range(len(hypotheses)):
-                        hypotheses[hyp_idx] = self.compute_ctc_timestamps(hypotheses[hyp_idx], timestamp_type, return_token_ids)
+                        hypotheses[hyp_idx] = self.compute_ctc_timestamps(
+                            hypotheses[hyp_idx], timestamp_type, return_token_ids
+                        )
 
             if return_hypotheses:
                 return hypotheses
@@ -684,7 +688,9 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
         return text
 
-    def compute_ctc_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all", return_token_ids: bool = False):
+    def compute_ctc_timestamps(
+        self, hypothesis: Hypothesis, timestamp_type: str = "all", return_token_ids: bool = False
+    ):
         """
         Method to compute time stamps at char/subword, and word level given some hypothesis.
         Requires the input hypothesis to contain a `text` field that is the tuple. The tuple contains -

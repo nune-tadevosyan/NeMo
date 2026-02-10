@@ -44,7 +44,7 @@ def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
     """
     Install a stub for ASRModel.transcribe that captures parameters and optionally
     triggers the merge stub when chunking is enabled.
-    
+
     Args:
         monkeypatch: pytest monkeypatch fixture
         capture: dict to capture 'enable_chunking' and 'override_config'
@@ -52,6 +52,7 @@ def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
         merge_stub_ref: optional dict with 'func' key pointing to the merge stub function.
                         If provided and enable_chunking is True, the merge stub will be called.
     """
+
     def _transcribe(
         self,
         *,
@@ -72,7 +73,7 @@ def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
         capture['override_config'] = override_config
         hyp = Hypothesis(score=0.0, y_sequence=torch.zeros(1, dtype=torch.long))
         setattr(hyp, 'id', hyp_id)
-        
+
         # Simulate what real transcribe does: call merge when chunking is enabled
         if enable_chunking and merge_stub_ref is not None and 'func' in merge_stub_ref:
             return merge_stub_ref['func']([hyp], timestamps, 8)  # subsampling_factor=4 as dummy
@@ -84,10 +85,11 @@ def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
 def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, raise_error=False):
     """
     Install a stub for merge_chunked_hypotheses.
-    
+
     Returns:
         dict with 'func' key containing the merge stub function, for use with _install_transcribe_stub
     """
+
     def _merge(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
         if merge_capture is not None:
             merge_capture['called'] = True
@@ -409,18 +411,18 @@ class TestEncDecRNNTBPEModel:
         model = fast_conformer_transducer_model
         model.eval()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
-        
+
         # Test with file path (no timestamps)
         hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
         assert hypotheses[0].timestamp == []
-        
+
         # Test with tensor input (with timestamps)
         audio_data, sr = librosa.load(audio_file, sr=16000)
         audio_tensor = [torch.from_numpy(audio_data)]
-        
+
         ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True)
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
@@ -463,8 +465,6 @@ class TestEncDecRNNTBPEModel:
             ts_hypotheses[0].timestamp['segment'][-1]['end_offset']
             == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
         )
-
-
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit

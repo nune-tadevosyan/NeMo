@@ -17,8 +17,8 @@ import os
 import shutil
 import tempfile
 
-import pytest
 import librosa
+import pytest
 import torch
 from lhotse import CutSet, MonoCut
 from lhotse.testing.dummies import DummyManifest
@@ -429,7 +429,6 @@ class TestEncDecCTCModel:
         assert cls_subset is None
         assert dataclass_subset is None
 
-
     @pytest.mark.unit
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_ctc_model):
         """Test chunking transcription with pretrained hybrid RNNT-CTC BPE model on long audio."""
@@ -439,7 +438,7 @@ class TestEncDecCTCModel:
         model.eval()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         # Test with file path (no timestamps)
-        hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False,enable_chunking=False)
+        hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False, enable_chunking=False)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0

@@ -113,11 +113,8 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
                     tokenizer=self.tokenizer,
                     return_cuts=config.get("do_transcribe", False) or enable_chunking,
                     enable_chunking=enable_chunking,
-                    
                 ),
                 tokenizer=self.tokenizer,
-                
-                
             )
 
         dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(

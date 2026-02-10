@@ -41,9 +41,7 @@ from nemo.collections.asr.parts.mixins.transcription import (
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDecoding, MultiTaskDecodingConfig
 from nemo.collections.asr.parts.submodules.token_classifier import TokenClassifier
-from nemo.collections.asr.parts.utils.chunking_utils import (
-    merge_chunked_hypotheses,
-)
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import (
     get_forced_aligned_timestamps_with_external_model,
@@ -541,7 +539,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             A list of transcriptions (or raw log probabilities if logprobs is True) in the same order
             as paths2audio_files
         """
-        
+
         if timestamps is not None:
             if self.timestamps_asr_model is None:
                 # TODO: Handle this key gracefully later
@@ -577,7 +575,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
         return super().transcribe(audio=audio, override_config=trcfg)
 
-
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
 
         assert config.get("use_lhotse", False), (
@@ -598,7 +595,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             dataset=PromptedAudioToTextLhotseDataset(
                 tokenizer=self.tokenizer,
                 prompt=self.prompt,
-                enable_chunking=enable_chunking, 
+                enable_chunking=enable_chunking,
             ),
             tokenizer=self.tokenizer,
         )
@@ -914,7 +911,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         audio_files = self._may_be_make_dict_and_fix_paths(audio_files, manifest_filepath, trcfg)
 
         return super()._transcribe_input_manifest_processing(audio_files, temp_dir, trcfg)
- 
+
     def _transcribe_forward(
         self, batch: PromptedAudioToTextMiniBatch | tuple[torch.Tensor, ...], trcfg: MultiTaskTranscriptionConfig
     ) -> dict:
@@ -1015,7 +1012,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         encoded_len = outputs.pop('encoded_lengths')
         enc_states = outputs.pop('encoder_states')
         enc_mask = outputs.pop('encoder_mask')
-        decoder_input_ids = outputs.pop('decoder_input_ids') 
+        decoder_input_ids = outputs.pop('decoder_input_ids')
         batch = outputs.pop('batch')
         del log_probs
         num_chunks = enc_states.shape[0]
@@ -1037,7 +1034,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 cut_id = batch.cuts[0].id
                 audio = batch.audio
                 audio_lens = batch.audio_lens
-                lang_id = batch.cuts[0].supervisions[0].language if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+                lang_id = (
+                    batch.cuts[0].supervisions[0].language
+                    if isinstance(self.tokenizer, tokenizers.AggregateTokenizer)
+                    else None
+                )
             else:  # TensorDataset / external DataLoader tuple type batch
                 cut_id = f'audio_{uuid.uuid4().int}'
                 audio = batch[0]
@@ -1065,7 +1066,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 tokenizer=self.tokenizer,
                 subsampling_factor=self.encoder.subsampling_factor,
                 window_stride=self.cfg['preprocessor']['window_stride'],
-                lang_id=lang_id
+                lang_id=lang_id,
             )
             # Inject the id of the cut to hypotheses to later be used for separate batches
             setattr(merged_hypotheses, 'id', cut_id)
@@ -1097,7 +1098,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             batch_size = min(config['batch_size'], len(config['paths2audio_files']))
-        enable_chunking = config.get('enable_chunking', False) 
+        enable_chunking = config.get('enable_chunking', False)
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,

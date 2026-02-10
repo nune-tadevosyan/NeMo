@@ -997,6 +997,7 @@ def test_aed_parallel_chunking_numpy(canary_1b_flash):
     # Verify transcription matches between different call styles
     assert hypotheses_numpy[0].text == hypotheses_filepath[0].text
 
+
 @pytest.mark.unit
 def test_aed_forced_aligned_timestamps_audio_tensor(canary_1b_v2):
     import librosa
@@ -1063,7 +1064,6 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
     audio_data, sr = librosa.load(audio_file, sr=16000)
     audio_batch = [torch.from_numpy(audio_data)]
 
-
     # Test with timestamps
     hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=1)
     hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=1)
@@ -1113,7 +1113,9 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
     }
 
     # Check that the number of words and segments are consistent
-    assert [word_offset['word'] for word_offset in hypotheses_tensor[0].timestamp['word']] == hypotheses_tensor[0].text.split()
+    assert [word_offset['word'] for word_offset in hypotheses_tensor[0].timestamp['word']] == hypotheses_tensor[
+        0
+    ].text.split()
     assert " ".join([word_offset['word'] for word_offset in hypotheses_tensor[0].timestamp['word']]) == " ".join(
         [segment_offset['segment'] for segment_offset in hypotheses_tensor[0].timestamp['segment']]
     )
@@ -1126,9 +1128,9 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
         == hypotheses_tensor[0].timestamp['word'][0]['start_offset']
     )
     assert (
-        hypotheses_tensor[0].timestamp['segment'][-1]['end_offset'] == hypotheses_tensor[0].timestamp['word'][-1]['end_offset']
+        hypotheses_tensor[0].timestamp['segment'][-1]['end_offset']
+        == hypotheses_tensor[0].timestamp['word'][-1]['end_offset']
     )
-
 
 
 @pytest.mark.unit

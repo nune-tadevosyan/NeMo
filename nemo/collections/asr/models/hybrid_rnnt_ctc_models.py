@@ -28,12 +28,13 @@ from nemo.collections.asr.parts.mixins import ASRBPEMixin, ASRTranscriptionMixin
 from nemo.collections.asr.parts.mixins.transcription import TranscriptionReturnType
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecoding, CTCDecodingConfig
+from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_outputs
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.mixins import AccessMixin
 from nemo.utils import logging, model_utils
-from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
+
 
 class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRTranscriptionMixin):
     """Base class for hybrid RNNT/CTC models."""
