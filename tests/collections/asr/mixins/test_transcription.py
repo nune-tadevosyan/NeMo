@@ -321,7 +321,7 @@ class TestTranscriptionMixin:
 
         # Audio file test
         #setting enable_chunking False for alignment check
-        outputs = fast_conformer_ctc_model.transcribe(audio_file, batch_size=1, return_hypotheses=True, enable_chunking=False) 
+        outputs = fast_conformer_ctc_model.transcribe(audio_file, batch_size=1, return_hypotheses=True) 
         assert len(outputs) == 1
         assert isinstance(outputs[0], Hypothesis)
 

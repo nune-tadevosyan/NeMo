@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -395,9 +395,13 @@ def merge_chunked_hypotheses(
     # When return_hypotheses is True, y_sequence contains logits (2D: [T, V]).
     if return_hypotheses and hasattr(hypotheses[0], 'token_sequence') and hypotheses[0].token_sequence is not None:
         merged_hypotheses.y_sequence = torch.cat([hyp.y_sequence for hyp in hypotheses], dim=0)
-        merged_hypotheses.token_sequence = torch.tensor(merged_tokens, dtype=torch.long)
+        merged_hypotheses.token_sequence = torch.tensor(merged_tokens)
     else:
         merged_hypotheses.y_sequence = torch.tensor(merged_tokens)
+
+    merged_alignments = join_alignments(hypotheses)
+    if merged_alignments is not None:
+        merged_hypotheses.alignments = merged_alignments
 
     merged_hypotheses = join_confidence_values(merged_hypotheses, hypotheses)
     merged_hypotheses.text = final_text
@@ -502,6 +506,48 @@ def update_timestamps(hypotheses, tokenizer=None, timestamps_type=None, lang_id=
         hypotheses.timestamp['segment'] = segment_offsets
         hypotheses.timestamp.pop('char', None)
     return hypotheses
+
+
+def join_alignments(
+    hypotheses: List[Hypothesis],
+) -> Optional[Union[torch.Tensor, List]]:
+    """
+    Concatenate alignments from multiple chunk hypotheses into a single sequence.
+
+    Supports both CTC alignments (1D: list of ints or tensor) and RNNT alignments
+    (2D: list of lists, one inner list per time step). If any hypothesis has no
+    alignments, returns None and the caller should leave merged alignments unset.
+
+    Args:
+        hypotheses: List of Hypothesis objects, each possibly having an alignments attribute.
+
+    Returns:
+        Concatenated alignments (tensor or list), or None if any hypothesis has no alignments.
+    """
+    if not hypotheses:
+        return None
+    if not all(getattr(h, 'alignments', None) is not None for h in hypotheses):
+        return None
+
+    alignments_list = [h.alignments for h in hypotheses]
+
+    # CTC: alignments are a 1D tensor
+    if isinstance(alignments_list[0], torch.Tensor):
+        return torch.cat(alignments_list, dim=0)
+
+    # RNNT: alignments are list of lists (one list per time step T)
+    first_nonempty = next((a for a in alignments_list if len(a) > 0), None)
+    if first_nonempty is not None and isinstance(first_nonempty[0], (list, tuple)):
+        result = []
+        for a in alignments_list:
+            result.extend(a)
+        return result
+
+    # CTC: alignments are a flat list of ints
+    result = []
+    for a in alignments_list:
+        result.extend(a.tolist() if isinstance(a, torch.Tensor) else a)
+    return result
 
 
 def join_confidence_values(merged_hypothesis, hypotheses):
@@ -1115,6 +1161,11 @@ def merge_hypotheses_of_same_audio(
         ]
         if valid_y_sequences:
             merged_hypothesis.y_sequence = torch.cat(valid_y_sequences)
+
+    # Merge alignments from all hypotheses (CTC: 1D tensor/list; RNNT: list of lists)
+    merged_alignments = join_alignments(hypotheses_list)
+    if merged_alignments is not None:
+        merged_hypothesis.alignments = merged_alignments
 
     # Merge confidence values from all hypotheses
     merged_hypothesis = join_confidence_values(merged_hypothesis, hypotheses_list)
