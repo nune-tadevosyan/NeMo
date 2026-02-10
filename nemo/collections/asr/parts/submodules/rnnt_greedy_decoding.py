@@ -612,8 +612,7 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         preserve_frame_confidence: bool = False,
         confidence_method_cfg: Optional[DictConfig] = None,
         loop_labels: bool = True,
-        # Change to to true for production
-        use_cuda_graph_decoder: bool = False,
+        use_cuda_graph_decoder: bool = True,
         fusion_models: Optional[List[NGramGPULanguageModel | GPUBoostingTreeModel]] = None,
         fusion_models_alpha: Optional[List[float]] = None,
         enable_per_stream_biasing: bool = False,
@@ -754,6 +753,7 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         # Preserve decoder and joint training state
         decoder_training_state = self.decoder.training
         joint_training_state = self.joint.training
+
         with torch.inference_mode():
             # Apply optional preprocessing
             encoder_output = encoder_output.transpose(1, 2)  # (B, T, D)
@@ -763,6 +763,7 @@ class GreedyBatchedRNNTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
             self.joint.eval()
 
             inseq = encoder_output  # [B, T, D]
+
             hypotheses = self._greedy_decode(
                 inseq, logitlen, device=inseq.device, partial_hypotheses=partial_hypotheses
             )
@@ -2467,8 +2468,7 @@ class GreedyBatchedRNNTInferConfig:
     tdt_include_duration_confidence: bool = False
     confidence_method_cfg: Optional[ConfidenceMethodConfig] = field(default_factory=lambda: ConfidenceMethodConfig())
     loop_labels: bool = True
-    #change to true for production
-    use_cuda_graph_decoder: bool = False
+    use_cuda_graph_decoder: bool = True
     ngram_lm_model: Optional[str] = None
     ngram_lm_alpha: float = 0.0
     boosting_tree: BoostingTreeModelConfig = field(default_factory=BoostingTreeModelConfig)
@@ -2842,8 +2842,7 @@ class GreedyBatchedTDTInfer(_GreedyRNNTInfer, WithOptionalCudaGraphs):
         include_duration: bool = False,
         include_duration_confidence: bool = False,
         confidence_method_cfg: Optional[DictConfig] = None,
-        #change to true for production
-        use_cuda_graph_decoder: bool = False,
+        use_cuda_graph_decoder: bool = True,
         fusion_models: Optional[List[NGramGPULanguageModel]] = None,
         fusion_models_alpha: Optional[List[float]] = None,
         enable_per_stream_biasing: bool = False,
