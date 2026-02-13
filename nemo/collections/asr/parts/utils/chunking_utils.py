@@ -261,9 +261,8 @@ def _get_token_ids(hypothesis, return_hypotheses, timestamps, lang_id, tokenizer
     """
     Extract token IDs from a hypothesis for merging.
 
-    When return_hypotheses is True, y_sequence may contain logits (2D float tensor)
-    rather than token IDs. In that case, token_sequence (saved before logits overwrite)
-    holds the actual integer token IDs.
+    Prefer token_sequence (final token IDs after CTC collapse) when present;
+    otherwise use y_sequence  (in RNNT and AED models)
 
     Args:
         hypothesis: A Hypothesis object.
@@ -280,8 +279,7 @@ def _get_token_ids(hypothesis, return_hypotheses, timestamps, lang_id, tokenizer
         return None
     if lang_id is not None:
         return tokenizer.text_to_ids(hypothesis.text, lang_id=lang_id)
-    # When return_hypotheses is True, y_sequence contains logits; use token_sequence instead.
-    if return_hypotheses and hasattr(hypothesis, 'token_sequence') and hypothesis.token_sequence is not None:
+    if hasattr(hypothesis, 'token_sequence') and hypothesis.token_sequence is not None:
         seq = hypothesis.token_sequence
         return seq.tolist() if isinstance(seq, torch.Tensor) else list(seq)
     return hypothesis.y_sequence.tolist()
@@ -1126,43 +1124,43 @@ def merge_hypotheses_of_same_audio(
         score=0.0,
         y_sequence=torch.tensor([]),
         timestamp=([] if not timestamps else {}),
-    )
+    )   
 
-    # When return_hypotheses is True, y_sequence holds logits (2D: [T, V]) and
-    # token_sequence holds the actual integer token IDs (1D).
-    has_logits = (
-        return_hypotheses
-        and hasattr(hypotheses_list[0], 'token_sequence')
-        and hypotheses_list[0].token_sequence is not None
-    )
+    # token_sequence: when present, always concatenate from all chunks
+    token_seqs = [
+        h.token_sequence if isinstance(h.token_sequence, torch.Tensor) else torch.tensor(h.token_sequence)
+        for h in hypotheses_list
+        if getattr(h, 'token_sequence', None) is not None
+        and (
+            (isinstance(h.token_sequence, torch.Tensor) and h.token_sequence.numel() > 0)
+            or (not isinstance(h.token_sequence, torch.Tensor) and len(h.token_sequence) > 0)
+        )
+    ]
+    if token_seqs:
+        merged_hypothesis.token_sequence = torch.cat(token_seqs)
 
-    if has_logits:
-        # Concatenate logits from all chunks
-        valid_logits = [
-            h.y_sequence for h in hypotheses_list
+    # y_sequence: when return_hypotheses is True it holds logits (2D), else token IDs (1D)
+    if return_hypotheses:
+        logits_list = [
+            h.y_sequence
+            for h in hypotheses_list
             if isinstance(h.y_sequence, torch.Tensor) and h.y_sequence.numel() > 0
         ]
-        if valid_logits:
-            merged_hypothesis.y_sequence = torch.cat(valid_logits, dim=0)
-
-        # Concatenate token_sequence from all chunks
-        valid_token_sequences = [
-            h.token_sequence if isinstance(h.token_sequence, torch.Tensor) else torch.tensor(h.token_sequence)
-            for h in hypotheses_list
-            if h.token_sequence is not None
-               and (isinstance(h.token_sequence, torch.Tensor) and h.token_sequence.numel() > 0
-                    or not isinstance(h.token_sequence, torch.Tensor) and len(h.token_sequence) > 0)
-        ]
-        if valid_token_sequences:
-            merged_hypothesis.token_sequence = torch.cat(valid_token_sequences)
+        if logits_list:
+            merged_hypothesis.y_sequence = torch.cat(logits_list, dim=0)
     else:
-        # Standard path: y_sequence holds integer token IDs (1D)
-        valid_y_sequences = [
-            h.y_sequence for h in hypotheses_list
-            if isinstance(h.y_sequence, torch.Tensor) and h.y_sequence.dim() == 1 and h.y_sequence.size(0) > 0
-        ]
-        if valid_y_sequences:
-            merged_hypothesis.y_sequence = torch.cat(valid_y_sequences)
+        if merged_hypothesis.token_sequence is not None:
+            merged_hypothesis.y_sequence = merged_hypothesis.token_sequence
+        else:
+            y_list = [
+                h.y_sequence
+                for h in hypotheses_list
+                if isinstance(h.y_sequence, torch.Tensor)
+                and h.y_sequence.dim() == 1
+                and h.y_sequence.size(0) > 0
+            ]
+            if y_list:
+                merged_hypothesis.y_sequence = torch.cat(y_list)
 
     # Merge alignments from all hypotheses (CTC: 1D tensor/list; RNNT: list of lists)
     merged_alignments = join_alignments(hypotheses_list)

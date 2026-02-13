@@ -115,7 +115,7 @@ class MultiTaskTranscriptionConfig(TranscribeConfig):
     """
     Configuration for Multi Task Transcription
 
-    enable_chunking: bool = True
+    enable_chunking: bool = False
             Whether to enable parallel processing of audio chunks for long-form audio.
             If enabled, batch_size should be set to 1 or single audio be passed.
     """
@@ -127,7 +127,7 @@ class MultiTaskTranscriptionConfig(TranscribeConfig):
     _internal: Optional[MultiTaskTranscriptionInternalConfig] = field(
         default_factory=lambda: MultiTaskTranscriptionInternalConfig()
     )
-    enable_chunking: bool = True
+    enable_chunking: bool = False
 
     def __post_init__(self):
         self.prompt = parse_multitask_prompt(self.prompt)
@@ -502,7 +502,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
-        enable_chunking: bool = True,
+        enable_chunking: bool = False,
         override_config: Optional[MultiTaskTranscriptionConfig] = None,
         **prompt,
     ) -> Union[List[str], List[Hypothesis]]:
@@ -565,6 +565,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 verbose=verbose,
                 prompt=prompt,
                 timestamps=timestamps,
+                enable_chunking=enable_chunking,
             )
         else:
             if not isinstance(override_config, MultiTaskTranscriptionConfig):
@@ -574,7 +575,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 )
             trcfg = override_config
             trcfg.timestamps = timestamps
-
+            trcfg.enable_chunking = enable_chunking
         return super().transcribe(audio=audio, override_config=trcfg)
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
@@ -1032,7 +1033,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         )
         merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
         del enc_states, enc_mask, decoder_input_ids
-
         # Determine the cut id to inject into hypotheses for chunking
         if trcfg.enable_chunking or trcfg.timestamps:
             if isinstance(batch, PromptedAudioToTextMiniBatch):

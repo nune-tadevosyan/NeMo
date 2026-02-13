@@ -256,7 +256,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
-        enable_chunking: bool = True, 
+        enable_chunking: bool = False,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
