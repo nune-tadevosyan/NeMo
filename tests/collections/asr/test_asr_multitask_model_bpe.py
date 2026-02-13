@@ -981,6 +981,7 @@ def test_aed_parallel_chunking_numpy(canary_1b_flash):
         target_lang='en',
         task='asr',
         pnc='yes',
+        enable_chunking=True,
     )
     assert len(hypotheses_numpy) == 1
     assert hypotheses_numpy[0].timestamp == []
@@ -990,7 +991,7 @@ def test_aed_parallel_chunking_numpy(canary_1b_flash):
     assert hypotheses_numpy[0].text[-25:] == 'mer orders and relatively'
 
     # Test with list of numpy arrays
-    hypotheses_filepath = canary_1b_flash.transcribe(audio_file)
+    hypotheses_filepath = canary_1b_flash.transcribe(audio_file, enable_chunking=True)
     assert len(hypotheses_filepath) == 1
     assert hypotheses_filepath[0].timestamp == []
 
@@ -1017,7 +1018,7 @@ def test_aed_forced_aligned_timestamps_audio_tensor(canary_1b_v2):
     assert hypotheses[0].timestamp == []
     assert hypotheses[1].timestamp == []
 
-    ts_hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=2, enable_chunking=False)
+    ts_hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=2)
     assert len(ts_hypotheses) == 2
 
     assert "word" in ts_hypotheses[0].timestamp
@@ -1065,8 +1066,8 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
     audio_batch = [torch.from_numpy(audio_data)]
 
     # Test with timestamps
-    hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=1)
-    hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=1)
+    hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=1, enable_chunking=True)
+    hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=1, enable_chunking=True)
 
     # Verify both methods return valid results
     assert len(hypotheses_tensor) == 1
@@ -1139,10 +1140,10 @@ def test_aed_parallel_chunking(canary_1b_v2):
     audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
     # Testing on long audio file to check chunking and timestamps extraction
 
-    hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False)
+    hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False, enable_chunking=True)
     assert len(hypotheses) == 1
     assert hypotheses[0].timestamp == []
-    ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True)
+    ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True, enable_chunking=True)
     assert len(ts_hypotheses) == 1
     assert ts_hypotheses[0].text == hypotheses[0].text
     assert "char" not in ts_hypotheses[0].timestamp

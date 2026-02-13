@@ -105,7 +105,7 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: bool = None,
-        enable_chunking: bool = True,
+        enable_chunking: bool = False,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -229,9 +229,6 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         if trcfg.return_hypotheses:
             # dump log probs per file
             for idx in range(logits.shape[0]):
-                if trcfg.enable_chunking:
-                    hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
-                hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
                 hypotheses[idx].y_sequence = logits[idx][: encoded_len[idx]]
                 if hypotheses[idx].alignments is None:
                     hypotheses[idx].alignments = hypotheses[idx].y_sequence

@@ -129,7 +129,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
-        enable_chunking: bool = True,
+        enable_chunking: bool = False,
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
@@ -747,8 +747,6 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 # cudaMallocHost()-allocated tensor to be floating
                 # around. Were that to be the case, then the pinned
                 # memory cache would always miss.
-                if trcfg.enable_chunking:
-                    hypotheses[idx].token_sequence = hypotheses[idx].y_sequence
                 hypotheses[idx].y_sequence = logits_cpu[idx, : logits_len[idx]].clone()
                 if hypotheses[idx].alignments is None:
                     hypotheses[idx].alignments = hypotheses[idx].y_sequence

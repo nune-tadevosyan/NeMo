@@ -405,7 +405,6 @@ class TestEncDecRNNTBPEModel:
         assert isinstance(asr_model.decoding.decoding, beam_decode.BeamRNNTInfer)
         assert asr_model.decoding.decoding.search_type == "alsd"
 
-    @pytest.mark.with_downloads()
     @pytest.mark.unit
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_transducer_model):
         model = fast_conformer_transducer_model
@@ -413,7 +412,7 @@ class TestEncDecRNNTBPEModel:
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
 
         # Test with file path (no timestamps)
-        hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False)
+        hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False, enable_chunking=True)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
@@ -423,7 +422,8 @@ class TestEncDecRNNTBPEModel:
         audio_data, sr = librosa.load(audio_file, sr=16000)
         audio_tensor = [torch.from_numpy(audio_data)]
 
-        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True)
+        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True, enable_chunking=True)
+        import pdb; pdb.set_trace()
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
         assert ts_hypotheses[0].text == hypotheses[0].text

@@ -67,7 +67,7 @@ class TranscribeConfig:
     verbose: bool = True
     # Utility
     partial_hypothesis: Optional[List[Any]] = None
-    enable_chunking: Optional[bool] = True
+    enable_chunking: Optional[bool] = False
     _internal: Optional[InternalTranscribeConfig] = None
 
 
@@ -121,7 +121,7 @@ def resolve_chunking(
     if isinstance(audio, DataLoader):
         return False
 
-    if _is_single_audio(audio) or batch_size == 1:
+    if  batch_size == 1 or _is_single_audio(audio):
         return True
 
     logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1.")
@@ -351,7 +351,7 @@ class TranscriptionMixin(ABC):
         augmentor: DictConfig = None,
         verbose: bool = True,
         timestamps: Optional[bool] = None,
-        enable_chunking: bool = True,
+        enable_chunking: bool = False,
         override_config: Optional[TranscribeConfig] = None,
         **config_kwargs,
     ) -> GenericTranscriptionType:
@@ -422,7 +422,6 @@ class TranscriptionMixin(ABC):
                 override_config._internal = InternalTranscribeConfig()
 
             transcribe_cfg = override_config
-
         # Add new internal config
         if transcribe_cfg._internal is None:
             transcribe_cfg._internal = InternalTranscribeConfig()
