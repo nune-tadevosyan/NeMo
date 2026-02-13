@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import shutil
 import tempfile
@@ -22,10 +23,9 @@ import pytest
 import torch
 from lhotse import CutSet, MonoCut
 from lhotse.testing.dummies import DummyManifest
-from omegaconf import DictConfig
 from lightning.pytorch import Trainer
+from omegaconf import DictConfig, OmegaConf
 
-import nemo.collections.asr.models.rnnt_models as rnnt_models
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
@@ -39,70 +39,6 @@ from nemo.core.utils.numba_utils import __NUMBA_MINIMUM_VERSION__
 NUMBA_RNNT_LOSS_AVAILABLE = numba_utils.numba_cpu_is_supported(
     __NUMBA_MINIMUM_VERSION__
 ) or numba_utils.numba_cuda_is_supported(__NUMBA_MINIMUM_VERSION__)
-
-
-def _install_transcribe_stub(monkeypatch, capture, hyp_id, merge_stub_ref=None):
-    """
-    Install a stub for ASRModel.transcribe that captures parameters and optionally
-    triggers the merge stub when chunking is enabled.
-    
-    Args:
-        monkeypatch: pytest monkeypatch fixture
-        capture: dict to capture 'enable_chunking' and 'override_config'
-        hyp_id: ID to assign to the returned hypothesis
-        merge_stub_ref: optional dict with 'func' key pointing to the merge stub function.
-                        If provided and enable_chunking is True, the merge stub will be called.
-    """
-    def _transcribe(
-        self,
-        *,
-        audio,
-        batch_size,
-        return_hypotheses,
-        num_workers,
-        channel_selector,
-        augmentor,
-        verbose,
-        timestamps,
-        override_config,
-        partial_hypothesis,
-        enable_chunking,
-        **kwargs,
-    ):
-        capture['enable_chunking'] = enable_chunking
-        capture['override_config'] = override_config
-        hyp = Hypothesis(score=0.0, y_sequence=torch.zeros(1, dtype=torch.long))
-        setattr(hyp, 'id', hyp_id)
-        
-        # Simulate what real transcribe does: call merge when chunking is enabled
-        if enable_chunking and merge_stub_ref is not None and 'func' in merge_stub_ref:
-            return merge_stub_ref['func']([hyp], timestamps, 8)  # subsampling_factor=4 as dummy
-        return [hyp]
-
-    monkeypatch.setattr(ASRModel, 'transcribe', _transcribe, raising=False)
-
-
-def _install_merge_stub(monkeypatch, merge_capture=None, return_value=None, raise_error=False):
-    """
-    Install a stub for merge_chunked_hypotheses.
-    
-    Returns:
-        dict with 'func' key containing the merge stub function, for use with _install_transcribe_stub
-    """
-    def _merge(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):
-        if merge_capture is not None:
-            merge_capture['called'] = True
-            merge_capture['timestamps'] = timestamps
-            merge_capture['subsampling_factor'] = subsampling_factor
-            merge_capture['timestamps_type'] = timestamps_type
-        if raise_error:
-            raise AssertionError("Chunk merge should not be triggered when chunking is disabled.")
-        if callable(return_value):
-            return return_value(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds, timestamps_type)
-        return return_value
-
-    monkeypatch.setattr(rnnt_models, 'merge_chunked_hypotheses', _merge)
-    return {'func': _merge}
 
 
 @pytest.fixture()
@@ -420,7 +356,6 @@ class TestEncDecRNNTBPEModel:
         audio_tensor = [torch.from_numpy(audio_data)]
 
         ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True, enable_chunking=True)
-        import pdb; pdb.set_trace()
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
         assert ts_hypotheses[0].text == hypotheses[0].text
@@ -460,7 +395,39 @@ class TestEncDecRNNTBPEModel:
             ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
         )
 
+        # Test chunking with confidence: merged hypothesis should have confidences from join_confidence_values
+        orig_decoding = copy.deepcopy(model.cfg.decoding)
+        decoding_cfg = OmegaConf.merge(
+            OmegaConf.create(OmegaConf.to_container(orig_decoding)),
+            {
+                'greedy': {'preserve_frame_confidence': True},
+                'confidence_cfg': {
+                    'preserve_frame_confidence': True,
+                    'preserve_token_confidence': True,
+                    'preserve_word_confidence': True,
+                },
+            },
+        )
+        model.change_decoding_strategy(decoding_cfg)
+        conf_hypotheses = model.transcribe(
+            audio_file, batch_size=1, return_hypotheses=True, timestamps=False, enable_chunking=True
+        )
+        model.change_decoding_strategy(orig_decoding)
 
+        assert len(conf_hypotheses) == 1
+        hyp = conf_hypotheses[0]
+        assert isinstance(hyp, Hypothesis)
+        assert isinstance(hyp.text, str) and len(hyp.text) > 0
+        # Chunking merges confidences via join_confidence_values
+        assert hyp.frame_confidence is not None, "Merged hypothesis should have frame_confidence"
+        assert hyp.token_confidence is not None, "Merged hypothesis should have token_confidence"
+        assert hyp.word_confidence is not None, "Merged hypothesis should have word_confidence"
+        num_words = len(hyp.text.split())
+        assert len(hyp.word_confidence) == 1379
+        assert all(
+            0 <= c <= 1.0 for c in hyp.word_confidence
+        ), "word_confidence values should be in [0, 1]"
+        assert len(hyp.token_confidence) >= num_words, "token_confidence should have at least one per word"
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit
