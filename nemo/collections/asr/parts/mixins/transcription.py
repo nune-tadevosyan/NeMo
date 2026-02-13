@@ -16,7 +16,7 @@ import json
 import os
 import tempfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -69,6 +69,7 @@ class TranscribeConfig:
     partial_hypothesis: Optional[List[Any]] = None
     enable_chunking: Optional[bool] = False
     _internal: Optional[InternalTranscribeConfig] = None
+    chunk_range: Optional[List[int]] = field(default_factory=lambda: [240, 300])
 
 
 def get_value_from_transcription_config(trcfg, key, default):
@@ -715,7 +716,6 @@ class TranscriptionMixin(ABC):
         # Determine model-specific default chunk range
         # Canary models (have transf_decoder) use shorter chunks (30-40s)
         # Parakeet models use longer chunks (240-300s)
-        chunk_range = [30, 40] if hasattr(self, 'transf_decoder') else [240, 300]
         ds_config = {
             'use_lhotse': get_value_from_transcription_config(trcfg, 'use_lhotse', True),
             'audio_tensors': audio_tensors,
@@ -727,7 +727,7 @@ class TranscriptionMixin(ABC):
             'pad_min_duration': get_value_from_transcription_config(trcfg, 'pad_min_duration', 1.0),
             'pad_direction': get_value_from_transcription_config(trcfg, 'pad_direction', 'both'),
             'enable_chunking': get_value_from_transcription_config(trcfg, 'enable_chunking', False),
-            'chunk_range': chunk_range,
+            'chunk_range': get_value_from_transcription_config(trcfg, 'chunk_range', [240, 300]),
         }
 
         augmentor = get_value_from_transcription_config(trcfg, 'augmentor', None)
