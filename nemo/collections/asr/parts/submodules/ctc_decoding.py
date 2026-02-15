@@ -525,7 +525,11 @@ class AbstractCTCDecoding(ConfidenceMixin):
             if return_hypotheses:
                 return hypotheses
 
-            return [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses]
+            out = [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses]
+            for h, o in zip(hypotheses, out):
+                if getattr(h, 'token_sequence', None) is not None and return_token_ids:
+                    o.token_sequence = h.token_sequence
+            return out
 
     def decode_hypothesis(
         self, hypotheses_list: List[Hypothesis], fold_consecutive: bool
@@ -585,7 +589,8 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 decoded_prediction = prediction[prediction != self.blank_id].tolist()
                 token_lengths = [1] * len(decoded_prediction)  # preserve number of repetitions per token
                 token_repetitions = [1] * len(decoded_prediction)  # preserve number of repetitions per token
-
+            # Final token sequence after CTC collapse (blanks removed, consecutive merged)
+            hypotheses_list[ind].token_sequence = list(decoded_prediction)
             # De-tokenize the integer tokens; if not computing timestamps
             if self.compute_timestamps is True:
                 # keep the original predictions, wrap with the number of repetitions per token
@@ -602,7 +607,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
     def compute_confidence(self, hypotheses_list: List[Hypothesis]) -> List[Hypothesis]:
         """
-        Computes high-level (per-token and/or per-word) confidence scores for a list of hypotheses.
+        Computes high-level (per-token and/or per-word) confidence scores for a list of hypotheses.`
         Assumes that `frame_confidence` is present in the hypotheses.
 
         Args:

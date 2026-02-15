@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo.collections.audio.losses.audio import MAELoss, MSELoss, SDRLoss
+from nemo.collections.asr.inference.streaming.state.state import StreamingState
 
-__all__ = ["MAELoss", "MSELoss", "SDRLoss"]
+
+class SALMStreamingState(StreamingState):
+    """
+    State of the streaming SALM pipeline
+    """
+
+    pass
