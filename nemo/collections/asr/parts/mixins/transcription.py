@@ -861,7 +861,7 @@ class TranscriptionMixin(ABC):
                 _speech_collate_fn_with_chunking,
                 pad_id=pad_id,
                 sample_rate=config['sample_rate'],
-                chunk_range=config.get('chunk_range', [30, 40]),
+                chunk_range=config.get('chunk_range', [240, 300]),
             )
         else:
             collate_fn = partial(_speech_collate_fn, pad_id=pad_id)

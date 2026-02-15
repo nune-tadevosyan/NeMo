@@ -364,7 +364,6 @@ def merge_chunked_hypotheses(
             buffer=merged_tokens,
             data=data[: int(delay * 0.6)],  # only approximately 60% of the frames have corresponding tokens
             delay=delay,
-            model=None,
             max_steps_per_timestep=2,
             min_lcs_length=1,
             parallel_chunking=True,
@@ -1162,11 +1161,11 @@ def merge_hypotheses_of_same_audio(
             h.y_sequence
             for h in hypotheses_list
             if isinstance(h.y_sequence, torch.Tensor) and h.y_sequence.numel() > 0
-        ]
+    ]
         if logits_list:
             merged_hypothesis.y_sequence = torch.cat(logits_list, dim=0)
     else:
-        if merged_hypothesis.token_sequence is not None:
+        if getattr(merged_hypothesis, 'token_sequence', None) is not None:
             merged_hypothesis.y_sequence = merged_hypothesis.token_sequence
         else:
             y_list = [

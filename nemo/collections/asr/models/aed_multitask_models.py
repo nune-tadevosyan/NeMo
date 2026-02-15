@@ -574,6 +574,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             trcfg = override_config
             trcfg.timestamps = timestamps
             trcfg.enable_chunking = enable_chunking
+        if trcfg.enable_chunking:
+            trcfg.chunk_range = [30, 40]
         return super().transcribe(audio=audio, override_config=trcfg)
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
