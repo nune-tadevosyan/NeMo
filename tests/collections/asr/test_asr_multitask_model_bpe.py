@@ -968,7 +968,7 @@ def test_aed_forced_aligned_timestamps(canary_1b_v2):
 
 @pytest.mark.with_downloads()
 @pytest.mark.unit
-def test_aed_parallel_chunking_numpy(canary_1b_flash):
+def test_aed_parallel_chunking_numpy_flash(canary_1b_flash):
     """Test chunking transcription with canary_1b_flash model (without timestamps) using numpy array."""
     import librosa
 
@@ -1003,7 +1003,7 @@ def test_aed_parallel_chunking_numpy(canary_1b_flash):
     assert hypotheses_numpy[0].text == hypotheses_filepath[0].text
 
 @pytest.mark.unit
-def test_aed_forced_aligned_timestamps_audio_tensor(canary_1b_v2):
+def test_aed_forced_aligned_timestamps_audio_tensor_v2(canary_1b_v2):
     import librosa
 
     audio_file = "/home/TestData/asr/canary/dev-other-wav/8173-294714-0040.wav"
@@ -1059,7 +1059,7 @@ def test_aed_forced_aligned_timestamps_audio_tensor(canary_1b_v2):
 
 @pytest.mark.with_downloads()
 @pytest.mark.unit
-def test_aed_chunking_with_audio_tensor(canary_1b_v2):
+def test_aed_parallel_chunking_tensor_v2(canary_1b_v2):
     """Test that transcription with audio tensors produces the same results as file paths (with timestamps)."""
     import librosa
 
@@ -1138,7 +1138,7 @@ def test_aed_chunking_with_audio_tensor(canary_1b_v2):
 
 
 @pytest.mark.unit
-def test_aed_parallel_chunking(canary_1b_v2):
+def test_aed_parallel_chunking_v2(canary_1b_v2):
 
     audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
     # Testing on long audio file to check chunking and timestamps extraction
