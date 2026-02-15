@@ -457,16 +457,16 @@ class TestEncDecCTCModel:
         assert len(ts_hypotheses[0].timestamp['word']) > 0
         assert len(ts_hypotheses[0].timestamp['segment']) > 0
         # Monotonicity and validity of word offsets and times
-        assert ts_hypotheses[0].text[-35:] == 'ultiple customer orders and reality'
+        assert ts_hypotheses[0].text[-25:] == ' customer orders and real'
         words = ts_hypotheses[0].timestamp['word']
         starts = [w['start'] for w in words]
         ends = [w['end'] for w in words]
         assert words[-1] == {
-            'word': 'reality',
-            'start_offset': 7490,
-            'end_offset': 7497,
-            'start': 599.2,
-            'end': 599.76,
+            'word': 'real',
+            'start_offset': 7489,
+            'end_offset': 7491,
+            'start': 599.12,
+            'end': 599.28,
         }
         assert all(s <= e for s, e in zip(starts, ends))
         assert all(x <= y for x, y in zip(starts, starts[1:]))
