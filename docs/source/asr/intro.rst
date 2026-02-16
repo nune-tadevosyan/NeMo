@@ -180,6 +180,29 @@ Customization is available during both greedy and beam decoding. After :ref:`tra
 
 See detailed documentation here: :ref:`asr_language_modeling_and_customization`.
 
+Transcribe long audio files (chunking mode)
+-------------------------------------------
+You can transcribe long audio files by using the **chunking mode**: set `enable_chunking=True` in the `transcribe` method.
+Chunking is available only when you pass a single audio file or set `batch_size=1`; it is not used when the input is a pre-built DataLoader.
+
+.. code-block:: python
+
+    import nemo.collections.asr as nemo_asr
+    asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
+    transcript = asr_model.transcribe(["path/to/audio_file.wav"], enable_chunking=True)[0].text
+
+**Workflow**
+
+Long audio is split into overlapping segments (chunks) of configurable duration. For each chunk the model runs normally; the per-chunk hypotheses are then merged into a single transcript. This keeps memory and compute manageable while still producing one continuous result. Consecutive chunks overlap by about 1 second so that words spanning chunk boundaries can be merged correctly in the final text.
+
+**chunk_range**
+
+`chunk_range` is a pair ``[min_seconds, max_seconds]`` that defines the allowed duration of each chunk.
+
+* **Defaults:** Parakeet-style models use ``[240, 300]`` seconds; Canary-style (e.g. multi-task AED) models use ``[30, 40]`` seconds.
+* **Lhotse** Chunk duration is fixed in the Lhotse-based dataloaders used for file input: `LhotseSpeechToTextBpeDataset` and `PromptedAudioToTextLhotseDataset`.
+* **Tensors or numpy arrays:** When audio is passed as a tensor or numpy array, `chunk_range` is taken from :class:`TranscribeConfig` for `TranscriptionTensorDataset` (e.g. via `override_config` or the default ``[240, 300]``).
+
 Use real-time transcription
 ---------------------------
 
