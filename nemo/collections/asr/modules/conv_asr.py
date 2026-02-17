@@ -29,6 +29,7 @@ from nemo.collections.asr.parts.submodules.jasper import (
     init_weights,
     jasper_activations,
 )
+from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.asr.parts.submodules.tdnn_attention import (
     AttentivePoolLayer,
     StatsPoolLayer,
@@ -452,9 +453,11 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         if self.upscale:
             self.up1 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
             self.smooth1 = nn.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
+            self.act1 = Swish()
             if self.two_layer:
                 self.up2 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
-                self.smooth2=n.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
+                self.smooth2 = nn.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
+                self.act2 = Swish()
 
         self.apply(lambda x: init_weights(x, mode=init_mode))
 
@@ -475,13 +478,11 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         # Upsample time by 4x (two layers of 2x each): [B, feat_in, T] -> [B, feat_in, 4*T]
 
         if self.upscale:
-        x = encoder_output                              # [B, C, T]
-        x = self.up1(x)                                 # [B, C, 2T]
-        x = self.smooth1(x)                             # [B, C, 2T]
-        if self.two_layer:
-            x = self.up2(x)                             # [B, C, 4T]
-            x = self.smooth2(x)                         # [B, C, 4T]
-        encoder_output = x
+            x = encoder_output                              # [B, C, T]
+            x = self.act1(self.smooth1(self.up1(x)))       # [B, C, 2T]
+            if self.two_layer:
+                x = self.act2(self.smooth2(self.up2(x)))   # [B, C, 4T]
+            encoder_output = x
 
         if self.temperature != 1.0:
             return torch.nn.functional.log_softmax(
