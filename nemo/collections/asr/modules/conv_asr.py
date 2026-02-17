@@ -421,7 +421,7 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
     def output_types(self):
         return OrderedDict({"logprobs": NeuralType(('B', 'T', 'D'), LogprobsType())})
 
-    def __init__(self, feat_in, num_classes, init_mode="xavier_uniform", vocabulary=None, add_blank=True):
+    def __init__(self, feat_in, num_classes, init_mode="xavier_uniform", vocabulary=None, add_blank=True, upscale = False, two_layer=True):
         super().__init__()
 
         if vocabulary is None and num_classes < 0:
@@ -445,15 +445,17 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         self.decoder_layers = torch.nn.Sequential(
             torch.nn.Conv1d(self._feat_in, self._num_classes, kernel_size=1, bias=True)
         )
-        # Two layers of 2x temporal upsampling -> 4x total (T -> 4*T)
-        self.upscaler = torch.nn.Sequential(
-            torch.nn.ConvTranspose1d(
-                self._feat_in, self._feat_in, kernel_size=2, stride=2
-            ),
-            torch.nn.ConvTranspose1d(
-                self._feat_in, self._feat_in, kernel_size=2, stride=2
-            ),
-        )
+      
+        self.upscale =upscale
+        self.two_layer =two_layer
+
+        if self.upscale:
+            self.up1 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
+            self.smooth1 = nn.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
+            if self.two_layer:
+                self.up2 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
+                self.smooth2=n.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
+
         self.apply(lambda x: init_weights(x, mode=init_mode))
 
         accepted_adapters = [adapter_utils.LINEAR_ADAPTER_CLASSPATH]
@@ -471,7 +473,15 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
             encoder_output = encoder_output.transpose(1, 2)  # [B, C, T]
 
         # Upsample time by 4x (two layers of 2x each): [B, feat_in, T] -> [B, feat_in, 4*T]
-        encoder_output = self.upscaler(encoder_output)
+
+        if self.upscale:
+        x = encoder_output                              # [B, C, T]
+        x = self.up1(x)                                 # [B, C, 2T]
+        x = self.smooth1(x)                             # [B, C, 2T]
+        if self.two_layer:
+            x = self.up2(x)                             # [B, C, 4T]
+            x = self.smooth2(x)                         # [B, C, 4T]
+        encoder_output = x
 
         if self.temperature != 1.0:
             return torch.nn.functional.log_softmax(
