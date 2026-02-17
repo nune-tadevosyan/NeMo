@@ -28,7 +28,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
 from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.common.parts.utils import activation_registry
 from nemo.core.classes.mixins import AccessMixin
-from mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.modules.mamba2 import Mamba2
 
 __all__ = ['ConformerConvolution', 'ConformerFeedForward', 'ConformerLayer']
 
@@ -83,7 +83,8 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         use_mamba_only=False,
         mamba_d_model=1024,
         mamba_d_state=32,
-        mamba_expand=2,
+        mamba_expand=1,
+        use_bidirectional=False,
     ):
         super(ConformerLayer, self).__init__()
 
@@ -95,6 +96,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         self.n_heads = n_heads
         self.fc_factor = 0.5
         self.use_mamba_only = use_mamba_only
+
         # first feed forward module
         self.norm_feed_forward1 = LayerNorm(d_model)
         self.feed_forward1 = ConformerFeedForward(d_model=d_model, d_ff=d_ff, dropout=dropout, use_bias=use_bias)
@@ -109,10 +111,33 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
             use_bias=use_bias,
         )
         # multi-headed self-attention module
+        self.use_bidirectional=use_bidirectional
         self.norm_self_att = LayerNorm(d_model)
+
         MHA_max_cache_len = att_context_size[0]
         if self.use_mamba_only:
-            self.mamba_attention = Mamba(d_model=mamba_d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
+            if use_bidirectional:
+                # Bidirectional mode runs two independent Mamba blocks (forward + backward) over the
+                # *same* feature dimension as the Conformer layer (`d_model`), then concatenates and
+                # projects back to `d_model`. This mirrors a BiRNN-style pattern.
+                #
+                # Note: If you want `mamba_d_model != d_model`, you must add explicit input/output
+                # projections; this layer does not currently support that.
+                if mamba_d_model != d_model:
+                    raise ValueError(
+                        f"Invalid config: use_mamba_only=True and use_bidirectional=True require "
+                        f"mamba_d_model == d_model. Got mamba_d_model={mamba_d_model}, d_model={d_model}."
+                    )
+                self.mamba_attention_forward = Mamba2(d_model=d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
+                self.mamba_attention_backward = Mamba2(d_model=d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
+                self.bi_proj = torch.nn.Linear(2 * d_model, d_model)
+            else:
+                if mamba_d_model != d_model:
+                    raise ValueError(
+                        f"Invalid config: use_mamba_only=True requires mamba_d_model == d_model. "
+                        f"Got mamba_d_model={mamba_d_model}, d_model={d_model}."
+                    )
+                self.mamba_attention = Mamba2(d_model=mamba_d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
         else:
             if self_attention_model == 'rel_pos':
                 self.self_attn = RelPositionMultiHeadAttention(
@@ -183,10 +208,24 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         residual = residual + self.dropout(x) * self.fc_factor
         x = self.norm_self_att(residual)
         if self.use_mamba_only:
-            if inference_params:
-                x = self.mamba_attention(x,  inference_params)
+            if inference_params is not None:
+                if self.use_bidirectional:
+                    # Backward-direction requires full sequence context; not supported in streaming/incremental mode.
+                    raise NotImplementedError(
+                        "Bidirectional Mamba attention does not support `inference_params`. "
+                        "Set `use_bidirectional=False` for streaming/incremental inference."
+                    )
+                x = self.mamba_attention(x, inference_params=inference_params)
             else:
-                x = self.mamba_attention(x)
+                if self.use_bidirectional:
+                    x_fwd = self.mamba_attention_forward(x)                           # [B, T, C]
+                    x_bwd = self.mamba_attention_backward(x.flip(dims=[1]))            # [B, T, C] on reversed time
+                    x_bwd = x_bwd.flip(dims=[1])                                       # back to [B, T, C]
+
+                    x = torch.cat([x_fwd, x_bwd], dim=-1)  
+                    x = self.bi_proj(x)     
+                else:
+                    x = self.mamba_attention(x)
         else:
             if self.self_attention_model == 'rel_pos':
                 x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)

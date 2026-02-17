@@ -106,16 +106,14 @@ def make_divisible_by(num, factor: int) -> int:
 
 def _reset_mamba_states(model) -> None:
     """Reset cached convolution and SSM states across all Mamba-based layers."""
-    for layer in model.modules():
-        if isinstance(layer, ConformerLayer):
-            mamba_attention = getattr(layer, "mamba_attention", None)
-            if mamba_attention is None:
-                continue
-            if hasattr(mamba_attention, "ssm_state"):
-                mamba_attention.ssm_state = None
-            if hasattr(mamba_attention, "conv_state"):
-                mamba_attention.conv_state = None
-            if hasattr(mamba_attention, "count"):
+    for module in model.modules():
+        # Use the Mamba2.reset_cache() API when available (resets both ssm_state and conv_state)
+        if hasattr(module, 'reset_cache') and callable(module.reset_cache):
+            module.reset_cache()
+        # Reset chunk counter on ConformerLayer mamba attention wrappers
+        if isinstance(module, ConformerLayer):
+            mamba_attention = getattr(module, "mamba_attention", None)
+            if mamba_attention is not None and hasattr(mamba_attention, "count"):
                 mamba_attention.count = 0
 
 
@@ -242,7 +240,8 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         cfg.decoding.greedy.preserve_alignments = False
         cfg.decoding.fused_batch_size = -1  # temporarily stop fused batch during inference.
         cfg.decoding.beam.return_best_hypothesis = True  # return and write the best hypothsis only
-
+    cfg.decoding.greedy.use_cuda_graph_decoder=False
+    cfg.decoding.beam.allow_cuda_graphs
     # Setup decoding strategy
     if hasattr(asr_model, 'change_decoding_strategy'):
         if not isinstance(asr_model, EncDecRNNTModel) and not isinstance(asr_model, EncDecHybridRNNTCTCModel):
@@ -258,7 +257,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     if asr_model.encoder.use_mamba_only:
         inference_params = InferenceParams(max_seqlen=20, max_batch_size=cfg.batch_size, seqlen_offset=5)
     else:
-        inference_params=None
+        inference_params = None
     if manifest is not None:
         records = read_manifest(manifest)
         manifest_dir = Path(manifest).parent.absolute()
@@ -326,7 +325,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         audio_data: AudioBatch
         for audio_data in tqdm(audio_dataloader):
             # NB: preprocessor runs on torch.float32, no need to cast dtype here
-            _reset_mamba_states(asr_model)
+            #_reset_mamba_states(asr_model)
             audio_batch = audio_data.audio_signals.to(device=map_location)
             audio_batch_lengths = audio_data.audio_signal_lengths.to(device=map_location)
             batch_size = audio_batch.shape[0]
@@ -377,11 +376,6 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 # remove extra context from encoder_output (leave only frames corresponding to the chunk)
                 encoder_context_batch = buffer.context_size_batch.subsample(factor=encoder_frame2audio_samples)
                 # remove left context
-
-
-
-
-                
                 encoder_output = encoder_output[:, encoder_context.left :]
 
                 # decode only chunk frames
