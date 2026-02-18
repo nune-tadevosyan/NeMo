@@ -140,7 +140,7 @@ class TranscriptionConfig:
 
     # Set to True to output greedy timestamp information (only supported models) and returns full alignment hypotheses
     timestamps: Optional[bool] = None
-    enable_chunking: Optional[bool] = True
+    enable_chunking: Optional[bool] = False
 
     # Set to True to return hypotheses instead of text from the transcribe function
     return_hypotheses: bool = False
