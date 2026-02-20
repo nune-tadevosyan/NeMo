@@ -1055,3 +1055,306 @@ def get_batch_variables(
         utt_obj_batch,
         output_timestep_duration,
     )
+def create_encoded_char_offsets_from_timestamps(timestamps, y_sequence, tokenizer):
+    """
+    Create encoded_char_offsets from timestamps and token sequence.
+    
+    Args:
+        timestamps: Dictionary with 'char' key containing character timestamps
+        y_sequence: List of token IDs
+        tokenizer: Model's tokenizer
+    
+    Returns:
+        List of encoded character offsets with string tokens (not IDs)
+    """
+    char_timestamps = timestamps['char']
+    encoded_char_offsets = []
+    new_char_timestamps = []
+    # # Convert token IDs to string tokens
+    # if hasattr(tokenizer, 'ids_to_tokens'):
+    #     string_tokens = tokenizer.text_ids(y_sequence)
+    # else:
+    #     # Fallback - convert IDs to strings
+    #     string_tokens = [str(token_id) for token_id in y_sequence]
+    
+    # Map character timestamps to token strings
+    
+    for i, char_offset in enumerate(char_timestamps):
+        if i == 0 and char_offset['char'] == ['Ġ']:
+            continue
+        encoded_offset = char_offset.copy()
+        
+        # Use string token instead of token IDs
+        if char_offset['char'] != ['<|eot_id|>']:
+            new_char_timestamps.append(char_offset)
+            encoded_offset['char'] = [tokenizer.tokens_to_text(char_offset['char'])]
+            # Keep token_id for reference if needed
+            
+            encoded_char_offsets.append(encoded_offset)
+        
+
+        # # Simple mapping: advance token index
+        # # You might need to adjust this based on your tokenizer's behavior
+        # token_idx += 1
+    
+    return encoded_char_offsets, new_char_timestamps
+
+# Alternative: If you know the exact mapping between characters and tokens
+def create_encoded_char_offsets_with_mapping(timestamps, y_sequence, tokenizer):
+    """
+    Create encoded_char_offsets with proper character-to-token mapping.
+    """
+    char_timestamps = timestamps['char']
+    
+    # Get string tokens from IDs
+    if hasattr(tokenizer, 'ids_to_tokens'):
+        string_tokens = tokenizer.ids_to_tokens(y_sequence)
+    else:
+        string_tokens = [str(token_id) for token_id in y_sequence]
+    
+    # Decode full text to understand character distribution
+    if hasattr(tokenizer, 'ids_to_text'):
+        full_text = tokenizer.ids_to_text(y_sequence)
+    elif hasattr(tokenizer, 'decode_ids_to_str'):
+        full_text = tokenizer.decode_ids_to_str(y_sequence)
+    else:
+        full_text = ''.join(string_tokens)
+    
+    encoded_char_offsets = []
+    token_idx = 0
+    char_in_token = 0
+    
+    for char_offset in char_timestamps:
+        encoded_offset = char_offset.copy()
+        
+        if token_idx < len(string_tokens):
+            # Use the string token, not the ID
+            encoded_offset['char'] = string_tokens[token_idx]
+            encoded_offset['token_id'] = y_sequence[token_idx] if token_idx < len(y_sequence) else None
+            
+            # Move to next token when current token's characters are exhausted
+            current_token = string_tokens[token_idx]
+            char_in_token += 1
+            
+            # For subword tokens, you might need more sophisticated logic here
+            if char_in_token >= len(current_token):
+                token_idx += 1
+                char_in_token = 0
+        else:
+            encoded_offset['char'] = char_offset['char']
+            encoded_offset['token_id'] = None
+        
+        encoded_char_offsets.append(encoded_offset)
+    
+    return encoded_char_offsets
+
+
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+def plot_raw_cost_matrix(attention_matrix):
+    """
+    Simple visualization of cost matrix to see alignment patterns.
+    
+    Args:
+        attention_matrix: Tensor [batch_size, decoder_steps, encoder_steps] or [decoder_steps, encoder_steps]
+        cost_function: 'neg_log' or 'invert' 
+    """
+    import matplotlib.pyplot as plt
+    if isinstance(attention_matrix, torch.Tensor):
+        attention_matrix = attention_matrix.cpu().float().numpy()
+    
+    # Handle both 2D and 3D arrays
+    if len(attention_matrix.shape) == 2:
+        # 2D case: [decoder_steps, encoder_steps]
+        plt.figure(figsize=(10, 6))
+        plt.imshow(attention_matrix, cmap='viridis', aspect='auto', origin='lower')
+        plt.colorbar(label='Cost')
+        plt.xlabel('Encoder Steps (Audio Frames)')
+        plt.ylabel('Decoder Steps (Text Tokens)')
+        plt.title('Raw Cost Matrix')
+        plt.savefig('cost_matrix.png')
+        plt.show()
+    else:
+        # 3D case: [batch_size, decoder_steps, encoder_steps]
+        batch_size = attention_matrix.shape[0]
+        
+        for b in range(batch_size):
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_matrix[b], cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Cost')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'Raw Cost Matrix - Batch {b}')
+            plt.savefig(f'cost_matrix_batch_{b}.png')
+            plt.show()
+        
+def create_timestamps_from_dtw_path(
+    path, 
+    y_sequence,  # Your token IDs 
+    tokenizer,   # Your model's tokenizer
+    frame_duration_ms=80.0
+):
+    """
+    Create timestamps from DTW path and token sequence.
+    
+    Args:
+        path: DTW alignment path like [(0, 0), (0, 1), (0, 2), ...]
+        y_sequence: List of token IDs from decoder
+        tokenizer: Model's tokenizer to convert tokens to text
+        frame_duration_ms: Duration per frame in milliseconds (default: 80ms)
+    
+    Returns:
+        Dictionary with character-level timestamps in the format you requested
+    """
+    import torch
+    
+    frame_duration_s = frame_duration_ms / 1000.0
+    
+    # Group path segments by decoder steps
+    segments = []
+    current_segment = None
+    
+    for decoder_step, encoder_step in path:
+        if current_segment is None or current_segment['decoder_step'] != decoder_step:
+            # Start new segment
+            if current_segment is not None:
+                segments.append(current_segment)
+            current_segment = {
+                'decoder_step': decoder_step,
+                'encoder_start': encoder_step,
+                'encoder_end': encoder_step
+            }
+        else:
+            # Extend current segment
+            current_segment['encoder_end'] = encoder_step
+    
+    if current_segment is not None:
+        segments.append(current_segment)
+    
+    # Create character-level timestamps
+    result_timestamps = []
+    char_offset = 0
+    
+    for segment in segments:
+        decoder_step = segment['decoder_step']
+        
+        # Skip if decoder step is out of range
+        if decoder_step >= len(y_sequence):
+            continue
+            
+        # Get the token text for this decoder step
+        token_id = y_sequence[decoder_step]
+        # Convert token ID to text using tokenizer
+        if hasattr(tokenizer, 'ids_to_tokens'):
+            token_text = tokenizer.ids_to_tokens([token_id.item()])
+        elif hasattr(tokenizer, 'decode_ids_to_str'):
+            token_text = tokenizer.decode_ids_to_str([token_id.item()])
+        elif hasattr(tokenizer, 'decode'):
+            token_text = tokenizer.decode([token_id.item()])
+        elif hasattr(tokenizer, 'ids_to_text'):
+            token_text = tokenizer.ids_to_text([token_id.item()])[0]
+        else:
+            # Fallback - convert to string
+            token_text = str(token_id)
+        
+        # Clean up token text (remove special tokens like <unk>, <pad>, etc.)
+        # if token_text.startswith('<') and token_text.endswith('>'):
+        #     continue  # Skip special tokens
+        
+        # Calculate timing
+        start_time = segment['encoder_start'] * frame_duration_s
+        end_time = segment['encoder_end'] * frame_duration_s
+        
+        # Create character-level timestamps for this token
+        if len(token_text) > 0:
+            
+            result_timestamps.append({
+                "char": token_text,
+                "start_offset": segment['encoder_start'],
+                "end_offset": segment['encoder_end'],
+                "start": round(start_time, 2),
+                "end": round(end_time, 2)
+            })
+            
+    
+    return {"char": result_timestamps}
+def dtw_alignment(attention_matrix, return_path=True, allow_vertical=True):
+    """
+    Compute DTW alignment from attention matrix to cost matrix.
+    
+    Args:
+        attention_matrix: Tensor of shape [batch_size, decoder_steps, encoder_steps]
+                         or [decoder_steps, encoder_steps] for single batch
+        return_path: Whether to return the optimal alignment path
+        allow_vertical: If True, allows vertical transitions (i-1, j). 
+                       If False, only allows diagonal (i-1, j-1) and horizontal (i, j-1) transitions.
+                       This prevents skipping encoder frames.
+    
+    Returns:
+        cost: DTW cost
+        path: Optimal alignment path (if return_path=True)
+    """
+    if len(attention_matrix.shape) == 2:
+        attention_matrix = attention_matrix.reshape(1, attention_matrix.shape[0], attention_matrix.shape[1])
+    
+    batch_size, M, N = attention_matrix.shape  # M=decoder_steps, N=encoder_steps
+    cost_matrix = -attention_matrix
+
+    
+    results = []
+    
+    for b in range(batch_size):
+        cost = cost_matrix[b]  # [M, N]
+        
+        # Initialize DTW matrix
+        dtw_matrix = torch.full((M + 1, N + 1), float('inf'), device=cost.device)
+        dtw_matrix[0, 0] = 0.0
+        
+        # Fill DTW matrix
+        for i in range(1, M + 1):
+            for j in range(1, N + 1):
+                dtw_cost = cost[i-1, j-1]
+                
+                # Build list of allowed transitions
+                transitions = [
+                    dtw_matrix[i, j-1],     # deletion (horizontal/right in path)
+                    dtw_matrix[i-1, j-1]    # match (diagonal)
+                ]
+                
+                if allow_vertical:
+                    transitions.append(dtw_matrix[i-1, j])  # insertion (vertical/up in path)
+                
+                dtw_matrix[i, j] = dtw_cost + torch.min(torch.stack(transitions))
+        
+        total_cost = dtw_matrix[M, N]
+        
+        if return_path:
+            # Backtrack to find optimal path
+            path = []
+            i, j = M, N
+            
+            while i > 0 and j > 0:
+                path.append((i-1, j-1))  # Convert back to 0-indexed
+                
+                # Find which direction gave minimum cost
+                candidates = [
+                    (dtw_matrix[i-1, j-1], (i-1, j-1)),  # diagonal
+                    (dtw_matrix[i, j-1], (i, j-1))       # left (horizontal)
+                ]
+                
+                if allow_vertical:
+                    candidates.append((dtw_matrix[i-1, j], (i-1, j)))  # up (vertical)
+                
+                _, (i, j) = min(candidates, key=lambda x: x[0])
+            
+            path.reverse()
+            results.append((total_cost, path))
+        else:
+            results.append(total_cost)
+    
+    if len(results) == 1:
+        return results[0]
+    return results

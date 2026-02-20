@@ -51,6 +51,7 @@ class SalmEvalConfig:
     extra_eos_tokens: Optional[list[str]] = None
     system_prompt: Optional[str] = None
     user_prompt: Optional[str] = None
+    timestamps: bool = False
     use_asr_decoder: bool = False  # set this to True if using SALMWithAsrDecoder
 
 
@@ -103,6 +104,8 @@ def main(cfg: SalmEvalConfig):
     hyps = []
     input_durations = []
     infer_durations = []
+    if cfg.timestamps:
+        timestamps = []
     for batch_idx, batch in enumerate(dloader):
         ts = perf_counter()
         answer_ids = model.generate(
@@ -115,15 +118,21 @@ def main(cfg: SalmEvalConfig):
                 eos_token_id=eos_tokens,
                 pad_token_id=model.text_pad_id,
             ),
+            timestamps=cfg.timestamps,
         )
-        answer_ids = answer_ids.cpu()
         batch_infer_duration = perf_counter() - ts
 
         batch_duration = sum(c.duration for c in batch["cuts"])
         batch_refs = [normalizer(cut.supervisions[0].text) for cut in batch["cuts"]]
-        batch_hyps = [
-            normalizer(model.tokenizer.ids_to_text(parse_hyp(ans, eos_tokens)).strip()) for ans in answer_ids
-        ]
+        if cfg.timestamps:
+            batch_hyps = [
+                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans[0], eos_tokens)).strip()) for ans in answer_ids
+            ]
+            timestamp_batch = [answer_ids[i][1] for i in range(len(answer_ids))]
+        else:
+            batch_hyps = [
+                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans, eos_tokens)).strip()) for ans in answer_ids
+            ]
         if cfg.verbose:
             batch_wer, _, nins, ndel, nsub = word_error_rate_detail(batch_hyps, batch_refs)
             batch_rtfx = batch_duration / batch_infer_duration
@@ -133,6 +142,8 @@ def main(cfg: SalmEvalConfig):
 
         refs.extend(batch_refs)
         hyps.extend(batch_hyps)
+        if cfg.timestamps:
+            timestamps.extend(timestamp_batch)
         input_durations.append(batch_duration)
         infer_durations.append(batch_infer_duration)
 
@@ -143,8 +154,12 @@ def main(cfg: SalmEvalConfig):
 
     if cfg.output_manifest is not None:
         with SequentialJsonlWriter(cfg.output_manifest) as writer:
-            for cut, ref, hyp in zip(cuts, refs, hyps):
-                writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp})
+            if cfg.timestamps:
+                for cut, ref, hyp, timestamp in zip(cuts, refs, hyps, timestamps):
+                    writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp})
+            else:
+                for cut, ref, hyp in zip(cuts, refs, hyps):
+                    writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp})
 
 
 def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):

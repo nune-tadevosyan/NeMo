@@ -15,7 +15,7 @@ import warnings
 from collections import defaultdict
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import torch
 from lhotse import CutSet
@@ -35,6 +35,12 @@ from torch.distributed.tensor.parallel import (
 )
 from transformers import GenerationConfig
 
+from nemo.collections.asr.parts.utils.aligner_utils import (
+    create_encoded_char_offsets_from_timestamps,
+    create_timestamps_from_dtw_path,
+    dtw_alignment,
+)
+from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
@@ -44,6 +50,78 @@ from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, i
 from nemo.collections.speechlm2.parts.pretrained import load_pretrained_hf, move_embedding, setup_speech_encoder
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, MaskType, NeuralType
 from nemo.utils import logging
+
+class PreSoftmaxCaptureHook:
+    """
+    Capture attention logits before softmax is applied.
+
+    The implementation mirrors the decoder variant but is kept local so that SALM
+    does not depend on the decoder module for this functionality.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.captured_scores: list[torch.Tensor] = []
+        self.original_softmax = None
+        self._is_active = False
+
+    def patched_softmax(self, input, dim=None, _stacklevel=3, dtype=None):
+        if input.dim() >= 3:
+            self.captured_scores.append(input.detach().clone())
+        return self.original_softmax(input, dim=dim, _stacklevel=_stacklevel, dtype=dtype)
+
+    def register_hooks(self):
+        if self._is_active:
+            return
+        import torch.nn.functional as F
+
+        self.captured_scores = []
+        self.original_softmax = F.softmax
+        F.softmax = self.patched_softmax
+        self._is_active = True
+        logging.info("Pre-softmax capture hook activated (SALM)")
+
+    def remove_hooks(self):
+        if not self._is_active:
+            return
+        import torch.nn.functional as F
+
+        F.softmax = self.original_softmax
+        self._is_active = False
+        logging.info(f"Pre-softmax capture hook deactivated. Captured {len(self.captured_scores)} tensors.")
+
+    def get_captured_scores(self):
+        return self.captured_scores
+
+    def get_scores_by_token_and_layer(self, num_layers=None):
+        if not self.captured_scores:
+            return []
+
+        if num_layers is None and hasattr(self.model, "config") and hasattr(self.model.config, "num_hidden_layers"):
+            num_layers = self.model.config.num_hidden_layers
+        elif num_layers is None:
+            logging.warning("Could not auto-detect num_layers from model config while capturing attention.")
+            num_layers = len(self.captured_scores)
+
+        total = len(self.captured_scores)
+        num_tokens = total // num_layers if num_layers else 0
+
+        structured_scores = []
+        for token_idx in range(num_tokens):
+            token_scores = []
+            for layer_idx in range(num_layers):
+                flat_idx = token_idx * num_layers + layer_idx
+                if flat_idx < total:
+                    token_scores.append(self.captured_scores[flat_idx])
+            structured_scores.append(token_scores)
+        return structured_scores
+
+    def __enter__(self):
+        self.register_hooks()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.remove_hooks()
 
 
 class SALM(LightningModule, HFHubMixin):
@@ -292,6 +370,7 @@ class SALM(LightningModule, HFHubMixin):
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
         generation_config: GenerationConfig = None,
+        timestamps: bool = False,
         **generation_kwargs,
     ) -> torch.Tensor:
         """
@@ -405,12 +484,130 @@ class SALM(LightningModule, HFHubMixin):
         # Generate the answers using HF Generate API.
         # Note: we need to put the text embedding layer back to the LLM for processing.
         with move_embedding(self):
+            original_attn_impl = getattr(self.llm.config, "_attn_implementation", None)
+            if original_attn_impl is not None:
+                self.llm.config._attn_implementation = "eager"
             answer_tokens = self.llm.generate(
                 **generation_inputs,
                 **generation_kwargs,
                 generation_config=generation_config,
             )
-        return answer_tokens
+            if original_attn_impl is not None:
+                self.llm.config._attn_implementation = original_attn_impl
+
+        if audios is None or not timestamps:
+            return answer_tokens
+
+        return_answer_tokens = []
+        for batch_idx in range(len(audio_embeds)):
+            _, new_token_ids = self.retokenize_with_separate_space(answer_tokens[batch_idx])
+            if new_token_ids:
+                new_token_ids[0] = 220
+            text_embeds = self.embed_tokens(torch.tensor(new_token_ids, device=self.device))
+            audio_and_text_embeds = torch.cat(
+                [audio_embeds[batch_idx].unsqueeze(0), text_embeds.unsqueeze(0)],
+                dim=1,
+            )
+            audio_and_text_attention_mask = torch.ones(
+                1,
+                audio_and_text_embeds.shape[1],
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+            with move_embedding(self):
+                reset_attn_impl = False
+                original_attn_impl = getattr(self.llm.config, "_attn_implementation", None)
+                if original_attn_impl is not None:
+                    self.llm.config._attn_implementation = "eager"
+                    reset_attn_impl = True
+                with PreSoftmaxCaptureHook(self.llm) as hook_manager:
+                    self.llm(
+                        inputs_embeds=audio_and_text_embeds,
+                        attention_mask=audio_and_text_attention_mask,
+                        use_cache=False,
+                    )
+                    scores_by_token = hook_manager.get_scores_by_token_and_layer()
+                if reset_attn_impl:
+                    self.llm.config._attn_implementation = original_attn_impl
+
+            num_text_tokens = len(new_token_ids)
+            needed_scores = scores_by_token[0]
+            audio_len = audio_embed_lens[batch_idx]
+            attention_matrices = torch.stack(
+                [
+                    needed_scores[layer_idx][
+                        :, :, -num_text_tokens:, 1 : audio_len
+                    ]
+                    for layer_idx in range(len(needed_scores))
+                ],
+                dim=0,
+            ).squeeze(1)
+
+            attention_matrix = self._process_attention_matrix(attention_matrices)
+
+            dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
+            _, path = dtw_alignment(dtw_input, allow_vertical=True)
+            token_tensor = torch.tensor(new_token_ids)
+            ts = create_timestamps_from_dtw_path(path, token_tensor, self.tokenizer)
+            encoded_char_offsets, new_char_timestamps = create_encoded_char_offsets_from_timestamps(
+                ts,
+                token_tensor,
+                self.tokenizer,
+            )
+            word_offsets = get_words_offsets(
+                char_offsets=encoded_char_offsets,
+                decode_tokens_to_str=self.decode_tokens_to_str,
+                encoded_char_offsets=new_char_timestamps,
+                supported_punctuation={",", ".", "!", "?"},
+            )
+
+            return_answer_tokens.append((answer_tokens[batch_idx].cpu(), word_offsets))
+
+        return return_answer_tokens
+
+    def decode_tokens_to_str(self, tokens: List[str], lang: Optional[str] = None) -> str:
+        return self.tokenizer.tokens_to_text(tokens)
+
+    def retokenize_with_separate_space(self, ids: torch.Tensor | list[int]):
+        bpe_tokens = self.tokenizer.ids_to_tokens(ids)
+        processed_tokens = [""]
+        for token, id_token in zip(bpe_tokens, ids):
+            if isinstance(id_token, torch.Tensor):
+                id_token = id_token.item()
+            if id_token == 0:
+                continue
+            if token.startswith("Ġ") or token.startswith("Ġ"):
+                space_char = token[0]
+                rest_of_token = token[1:]
+                if rest_of_token:
+                    processed_tokens.append("Ġ")
+                    processed_tokens.append(token)
+                else:
+                    processed_tokens.append(space_char)
+            else:
+                processed_tokens.append(token)
+
+        token_ids = []
+        for token in processed_tokens:
+            token_ids.append(self.tokenizer.tokens_to_ids(token))
+        return processed_tokens, token_ids
+
+    def _process_attention_matrix(
+        self,
+        attention_matrix: torch.Tensor,
+        kernel_size: tuple[int, int, int] = (1, 1, 1),
+        qk_scale_factor: float = 1.0,
+    ) -> torch.Tensor:
+        from scipy.ndimage import median_filter
+
+        layers, heads, num_text_tokens, num_audio_frames = attention_matrix.shape
+        attention_matrix = attention_matrix.reshape(layers * heads, num_text_tokens, num_audio_frames)
+        attention_matrix = attention_matrix.double().cpu().numpy()
+        attention_matrix = torch.tensor(attention_matrix * qk_scale_factor).softmax(dim=-1)
+        attention_matrix = attention_matrix.mean(axis=0)
+        attention_matrix = attention_matrix / attention_matrix.norm(dim=-2, keepdim=True)
+        return attention_matrix
 
     def configure_optimizers(self):
         return configure_optimizers(self)
