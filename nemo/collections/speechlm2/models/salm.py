@@ -150,6 +150,60 @@ class SALM(LightningModule, HFHubMixin):
         self._use_fsdp = False
         self._use_tp = False
 
+    def _detect_space_token_info(self) -> tuple[str, int]:
+        """
+        Auto-detect the space prefix character and space token ID from the tokenizer.
+
+        Different tokenizers represent leading spaces differently:
+        - GPT-2 / Llama (BPE): 'Ġ' (U+0120), token ID 220
+        - SentencePiece (T5, mBART): '▁' (U+2581), variable ID
+        - Others may use different conventions
+
+        Returns:
+            (space_prefix_char, space_token_id)
+        """
+        tokens = self.tokenizer.text_to_tokens(" a")
+        if tokens and tokens[0] and tokens[0][0] not in ('a', ' '):
+            space_prefix_char = tokens[0][0]
+        else:
+            space_prefix_char = None
+            for candidate in ['Ġ', '▁']:
+                if self.tokenizer.tokens_to_ids([candidate])[0] != self.tokenizer.tokens_to_ids(['<unk>'])[0]:
+                    space_prefix_char = candidate
+                    break
+            if space_prefix_char is None:
+                logging.warning(
+                    "Could not auto-detect space prefix character from tokenizer. "
+                    "Falling back to 'Ġ'. Override space_prefix_char / space_token_id if this is wrong."
+                )
+                space_prefix_char = 'Ġ'
+
+        space_tokens = self.tokenizer.text_to_tokens(" ")
+        if space_tokens:
+            space_token_id = self.tokenizer.tokens_to_ids(space_tokens)[0]
+        else:
+            space_token_id = self.tokenizer.tokens_to_ids([space_prefix_char])[0]
+
+        logging.info(
+            f"Detected space prefix char: {repr(space_prefix_char)} (U+{ord(space_prefix_char):04X}), "
+            f"space token ID: {space_token_id}"
+        )
+        return space_prefix_char, space_token_id
+
+    @property
+    def space_prefix_char(self) -> str:
+        """The character used by the tokenizer to represent a leading space (e.g. 'Ġ' or '▁')."""
+        if not hasattr(self, '_space_prefix_char'):
+            self._space_prefix_char, self._space_token_id = self._detect_space_token_info()
+        return self._space_prefix_char
+
+    @property
+    def space_token_id(self) -> int:
+        """The token ID for a standalone space token in the tokenizer's vocabulary."""
+        if not hasattr(self, '_space_token_id'):
+            self._space_prefix_char, self._space_token_id = self._detect_space_token_info()
+        return self._space_token_id
+
     @property
     def text_vocab_size(self):
         """Return the size of the text tokenizer."""
@@ -502,7 +556,7 @@ class SALM(LightningModule, HFHubMixin):
         for batch_idx in range(len(audio_embeds)):
             _, new_token_ids = self.retokenize_with_separate_space(answer_tokens[batch_idx])
             if new_token_ids:
-                new_token_ids[0] = 220
+                new_token_ids[0] = self.space_token_id
             text_embeds = self.embed_tokens(torch.tensor(new_token_ids, device=self.device))
             audio_and_text_embeds = torch.cat(
                 [audio_embeds[batch_idx].unsqueeze(0), text_embeds.unsqueeze(0)],
@@ -570,21 +624,35 @@ class SALM(LightningModule, HFHubMixin):
         return self.tokenizer.tokens_to_text(tokens)
 
     def retokenize_with_separate_space(self, ids: torch.Tensor | list[int]):
+        """
+        Retokenize BPE token IDs by separating the space-prefix character from tokens.
+
+        Splits tokens whose first character matches ``self.space_prefix_char`` into
+        a standalone space token and the remainder.  Prepends an empty-string token
+        (mapped to whatever ID the tokenizer assigns to ``''``).
+
+        Args:
+            ids: Token IDs (list or tensor) to retokenize
+
+        Returns:
+            tuple: (tokens, token_ids)
+        """
         bpe_tokens = self.tokenizer.ids_to_tokens(ids)
+        sp = self.space_prefix_char
+
         processed_tokens = [""]
         for token, id_token in zip(bpe_tokens, ids):
             if isinstance(id_token, torch.Tensor):
                 id_token = id_token.item()
             if id_token == 0:
                 continue
-            if token.startswith("Ġ") or token.startswith("Ġ"):
-                space_char = token[0]
-                rest_of_token = token[1:]
+            if token.startswith(sp):
+                rest_of_token = token[len(sp):]
                 if rest_of_token:
-                    processed_tokens.append("Ġ")
+                    processed_tokens.append(sp)
                     processed_tokens.append(token)
                 else:
-                    processed_tokens.append(space_char)
+                    processed_tokens.append(token)
             else:
                 processed_tokens.append(token)
 

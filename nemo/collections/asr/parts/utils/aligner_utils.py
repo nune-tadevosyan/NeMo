@@ -1057,7 +1057,8 @@ def get_batch_variables(
     )
 def create_encoded_char_offsets_from_timestamps(timestamps, y_sequence, tokenizer):
     """
-    Create encoded_char_offsets from timestamps and token sequence.
+    C
+    reate encoded_char_offsets from timestamps and token sequence.
     
     Args:
         timestamps: Dictionary with 'char' key containing character timestamps

@@ -123,6 +123,7 @@ def main(cfg: SalmEvalConfig):
         batch_infer_duration = perf_counter() - ts
 
         batch_duration = sum(c.duration for c in batch["cuts"])
+
         batch_refs = [normalizer(cut.supervisions[0].text) for cut in batch["cuts"]]
         if cfg.timestamps:
             batch_hyps = [
