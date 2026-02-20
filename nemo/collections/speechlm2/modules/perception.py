@@ -49,6 +49,13 @@ class AudioPerceptionModule(NeuralModule, Exportable):
         else:
             self.spec_augmentation = None
         self.modality_adapter = self.from_config_dict(cfg.modality_adapter)
+        if isinstance(self.modality_adapter, (QformerConnector, MultiLayerProjectionConnector)):
+            self.encoder_multilayer = ConformerMultiLayerFeatureExtractor(
+                self.encoder,
+                layer_idx_list=cfg.modality_adapter.target_layer_ids,
+                detach=False,
+                convert_to_cpu=False,
+            )
         if 'output_dim' not in cfg.modality_adapter and "d_model" in cfg.modality_adapter:  # e.g., conformer encoder
             self.proj = nn.Linear(cfg.modality_adapter.d_model, cfg.output_dim)
         else:
@@ -93,7 +100,12 @@ class AudioPerceptionModule(NeuralModule, Exportable):
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
 
-        encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        if isinstance(self.modality_adapter, (QformerConnector, MultiLayerProjectionConnector)):
+            encoded, encoded_len = self.encoder_multilayer(
+                audio_signal=processed_signal, length=processed_signal_length
+            )
+        else:
+            encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         encoded, encoded_len = self.modality_adapter(audio_signal=encoded, length=encoded_len)
 
         # b, c, t -> b, t, c
