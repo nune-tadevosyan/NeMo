@@ -87,11 +87,23 @@ def setup_audio_codec(model: torch.nn.Module):
 
 def setup_speech_encoder(model: torch.nn.Module, pretrained_weights: bool = True):
     """
-    Sets up an ``AudioPerceptionModule``, initializing its ``encoder`` and ``preprocessor``
-    with a pretrained NeMo ``ASRModel``.
+    Sets up an ``AudioPerceptionModule`` or ``AudioTranscriptionPerceptionModule``,
+    initializing its ``encoder`` and ``preprocessor`` with a pretrained NeMo ``ASRModel``.
     The result is assigned to ``model.perception`` attribute and is trainable.
+
+    The perception class is determined by the ``target`` field in ``model.cfg.perception``.
+    If the target is ``AudioTranscriptionPerceptionModule``, it is instantiated directly
+    (it loads the ASR model internally). Otherwise, ``AudioPerceptionModule`` is used.
     """
-    if pretrained_weights:
+    from nemo.collections.speechlm2.modules.perception import AudioTranscriptionPerceptionModule
+
+    perception_target = model.cfg.perception.get("target", "")
+    if "AudioTranscriptionPerceptionModule" in perception_target:
+        model.perception = AudioTranscriptionPerceptionModule(
+            model.cfg.perception,
+            pretrained_asr=model.cfg.pretrained_asr,
+        ).train()
+    elif pretrained_weights:
         asr = load_pretrained_nemo(ASRModel, model.cfg.pretrained_asr).eval()
         with open_dict(model.cfg):
             model.cfg.perception.preprocessor = asr.cfg.preprocessor

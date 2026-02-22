@@ -26,7 +26,8 @@ from whisper_normalizer.english import EnglishTextNormalizer
 
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from nemo.collections.common.data.lhotse.cutset import guess_parse_cutset
-from nemo.collections.speechlm2.models import SALM, SALMWithAsrDecoder
+from nemo.collections.speechlm2.models.salm import SALM
+from nemo.collections.speechlm2.models.salm_asr_decoder import SALMWithAsrDecoder
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 
@@ -122,6 +123,8 @@ def main(cfg: SalmEvalConfig):
         )
         batch_infer_duration = perf_counter() - ts
 
+        if not cfg.timestamps:
+            answer_ids=answer_ids.cpu()
         batch_duration = sum(c.duration for c in batch["cuts"])
 
         batch_refs = [normalizer(cut.supervisions[0].text) for cut in batch["cuts"]]
