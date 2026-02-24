@@ -27,6 +27,20 @@ class HFHubMixin(
     docs_url="https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit",
 ):
     @classmethod
+    def _load_as_safetensor(cls, model, model_file, map_location, strict):
+        """
+        Override to bypass safetensors' _remove_duplicate_names check, which fails for
+        LSTM models where weight tensors are views into a flat parameter buffer and don't
+        cover the full storage. We load the state dict as a plain dict and call
+        load_state_dict directly.
+        """
+        from safetensors.torch import load_file
+
+        state_dict = load_file(model_file, device=map_location)
+        model.load_state_dict(state_dict, strict=strict)
+        return model
+
+    @classmethod
     def _from_pretrained(
         cls,
         *,

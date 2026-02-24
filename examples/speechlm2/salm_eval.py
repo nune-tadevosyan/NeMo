@@ -160,10 +160,16 @@ def main(cfg: SalmEvalConfig):
         with SequentialJsonlWriter(cfg.output_manifest) as writer:
             if cfg.timestamps:
                 for cut, ref, hyp, timestamp in zip(cuts, refs, hyps, timestamps):
-                    writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp})
+                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp}
+                    if cut.custom and "answer" in cut.custom:
+                        entry["answer"] = cut.custom["answer"]
+                    writer.write(entry)
             else:
                 for cut, ref, hyp in zip(cuts, refs, hyps):
-                    writer.write({"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp})
+                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp}
+                    if cut.custom and "answer" in cut.custom:
+                        entry["answer"] = cut.custom["answer"]
+                    writer.write(entry)
 
 
 def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):

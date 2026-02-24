@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from contextlib import contextmanager
 from typing import Sequence
 
 import click
 import numpy as np
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from tqdm import tqdm
 
 from nemo.collections.common.data.lhotse.cutset import get_parser_fn
+from nemo.collections.common.data.lhotse.nemo_adapters import expand_sharded_filepaths
 
 
 @click.command()
@@ -84,14 +87,17 @@ def count(entry: DictConfig | ListConfig, weight_key: str) -> None:
             count(subentry, weight_key=weight_key)
         return
 
-    with quick_iter_options(entry):
-        iterable, is_tarred = get_parser_fn(entry.type)(entry)
-        stats = {"num_hours": 0.0, "num_examples": 0}
-        for example in iterable:
-            if hasattr(example, "duration"):
-                stats["num_hours"] += example.duration
-            stats["num_examples"] += 1
-        stats["num_hours"] /= 3600.0
+    if entry.type in ("nemo", "nemo_tarred") and "manifest_filepath" in entry:
+        stats = _count_nemo_manifest_fast(entry, weight_key)
+    else:
+        with quick_iter_options(entry):
+            iterable, is_tarred = get_parser_fn(entry.type)(entry)
+            stats = {"num_hours": 0.0, "num_examples": 0}
+            for example in iterable:
+                if hasattr(example, "duration"):
+                    stats["num_hours"] += example.duration
+                stats["num_examples"] += 1
+            stats["num_hours"] /= 3600.0
 
     if weight_key == "num_hours" and stats[weight_key] == 0.0:
         raise RuntimeError(
@@ -100,6 +106,27 @@ def count(entry: DictConfig | ListConfig, weight_key: str) -> None:
         )
 
     entry["weight"] = stats[weight_key]
+
+
+def _count_nemo_manifest_fast(entry: DictConfig, weight_key: str) -> dict:
+    """
+    Fast path for nemo/nemo_tarred: read JSONL manifests directly,
+    skipping Lhotse object creation entirely.
+    """
+    paths = expand_sharded_filepaths(entry.manifest_filepath)
+    stats = {"num_hours": 0.0, "num_examples": 0}
+    need_duration = weight_key == "num_hours"
+    corpus_name = entry.get("corpus", entry.manifest_filepath)
+    for path in tqdm(paths, desc=f"  {corpus_name}", unit="shard", leave=True):
+        with open(path) as f:
+            for line in f:
+                stats["num_examples"] += 1
+                if need_duration:
+                    data = json.loads(line)
+                    stats["num_hours"] += data.get("duration", 0.0)
+    stats["num_hours"] /= 3600.0
+    click.echo(f"  -> {stats['num_examples']} examples, {stats['num_hours']:.1f}h")
+    return stats
 
 
 def aggregate_group_weights(entry: DictConfig | ListConfig) -> None:
@@ -159,13 +186,13 @@ def quick_iter_options(entry: DictConfig):
 
 
 def parse_temperature(value: list[float]) -> float | list[float] | None:
-    match value:
+    match len(value):
         case 0:
             return None
         case 1:
             return value[0]
         case _:
-            return value
+            return list(value)
 
 
 if __name__ == '__main__':
