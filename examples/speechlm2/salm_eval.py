@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import Optional
 
@@ -23,6 +25,9 @@ from omegaconf import OmegaConf
 from transformers import GenerationConfig
 from whisper_normalizer.basic import BasicTextNormalizer
 from whisper_normalizer.english import EnglishTextNormalizer
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "open_asr_leaderboard"))
+from normalizer import BasicMultilingualTextNormalizer
 
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from nemo.collections.common.data.lhotse.cutset import guess_parse_cutset
@@ -46,7 +51,7 @@ class SalmEvalConfig:
     max_new_tokens: int = 128
     output_manifest: Optional[str] = "generations.jsonl"
     verbose: bool = True
-    use_normalizer: Optional[str] = "english"  # "english", "basic", or "none" / "None"
+    use_normalizer: Optional[str] = "english"  # "english", "basic", "ml", or "none" / "None"
     device: str = "cuda"
     dtype: str = "bfloat16"
     extra_eos_tokens: Optional[list[str]] = None
@@ -74,9 +79,11 @@ def main(cfg: SalmEvalConfig):
         batch_size=None,
     )
 
-    normalizer = {"english": EnglishTextNormalizer(), "basic": BasicTextNormalizer()}.get(
-        cfg.use_normalizer, lambda x: x
-    )
+    normalizer = {
+        "english": EnglishTextNormalizer(),
+        "basic": BasicTextNormalizer(),
+        "ml": BasicMultilingualTextNormalizer(),
+    }.get(cfg.use_normalizer, lambda x: x)
 
     eos_tokens = [model.text_eos_id]
     if cfg.extra_eos_tokens is not None:
@@ -107,6 +114,7 @@ def main(cfg: SalmEvalConfig):
     infer_durations = []
     if cfg.timestamps:
         timestamps = []
+        segment_offsets_list = []
     for batch_idx, batch in enumerate(dloader):
         ts = perf_counter()
         answer_ids = model.generate(
@@ -133,6 +141,7 @@ def main(cfg: SalmEvalConfig):
                 normalizer(model.tokenizer.ids_to_text(parse_hyp(ans[0], eos_tokens)).strip()) for ans in answer_ids
             ]
             timestamp_batch = [answer_ids[i][1] for i in range(len(answer_ids))]
+            segment_offsets_batch = [answer_ids[i][2] for i in range(len(answer_ids))]
         else:
             batch_hyps = [
                 normalizer(model.tokenizer.ids_to_text(parse_hyp(ans, eos_tokens)).strip()) for ans in answer_ids
@@ -148,6 +157,7 @@ def main(cfg: SalmEvalConfig):
         hyps.extend(batch_hyps)
         if cfg.timestamps:
             timestamps.extend(timestamp_batch)
+            segment_offsets_list.extend(segment_offsets_batch)
         input_durations.append(batch_duration)
         infer_durations.append(batch_infer_duration)
 
@@ -159,8 +169,8 @@ def main(cfg: SalmEvalConfig):
     if cfg.output_manifest is not None:
         with SequentialJsonlWriter(cfg.output_manifest) as writer:
             if cfg.timestamps:
-                for cut, ref, hyp, timestamp in zip(cuts, refs, hyps, timestamps):
-                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp}
+                for cut, ref, hyp, timestamp, seg_offsets in zip(cuts, refs, hyps, timestamps, segment_offsets_list):
+                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp, "segment_offsets": seg_offsets}
                     if cut.custom and "answer" in cut.custom:
                         entry["answer"] = cut.custom["answer"]
                     writer.write(entry)

@@ -40,7 +40,7 @@ from nemo.collections.asr.parts.utils.aligner_utils import (
     create_timestamps_from_dtw_path,
     dtw_alignment,
 )
-from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
+from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets, get_segment_offsets
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
@@ -701,7 +701,7 @@ class SALM(LightningModule, HFHubMixin):
                 char_offsets=encoded_char_offsets,
                 decode_tokens_to_str=self.decode_tokens_to_str,
                 encoded_char_offsets=new_char_timestamps,
-                supported_punctuation={",", ".", "!", "?"},
+                supported_punctuation={",", ".", "!", "?","¿"},
             )
             for word in word_offsets:
                 if  word['start_offset'] > 0:
@@ -709,8 +709,9 @@ class SALM(LightningModule, HFHubMixin):
                     word['end_offset'] = word['end_offset'] - 1
                     word['start'] = word['start'] - 0.08
                     word['end'] = word['end'] - 0.08
-
-            return_answer_tokens.append((answer_tokens[batch_idx].cpu(), word_offsets))
+            
+            segment_offsets = get_segment_offsets(word_offsets=word_offsets, segment_delimiter_tokens={'.', '!', '?', "...", "¿"})
+            return_answer_tokens.append((answer_tokens[batch_idx].cpu(), word_offsets, segment_offsets))
 
         return return_answer_tokens
 
