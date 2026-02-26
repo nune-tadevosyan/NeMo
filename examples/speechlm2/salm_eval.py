@@ -116,6 +116,9 @@ def main(cfg: SalmEvalConfig):
         timestamps = []
         segment_offsets_list = []
     for batch_idx, batch in enumerate(dloader):
+        gt_texts = None
+        if cfg.timestamps:
+            gt_texts = [cut.supervisions[0].text for cut in batch["cuts"]]
         ts = perf_counter()
         answer_ids = model.generate(
             prompts=[prompt] * len(batch["cuts"]),  # identical prompt for each example
@@ -128,6 +131,7 @@ def main(cfg: SalmEvalConfig):
                 pad_token_id=model.text_pad_id,
             ),
             timestamps=cfg.timestamps,
+            ground_truth_texts=gt_texts,
         )
         batch_infer_duration = perf_counter() - ts
 

@@ -528,6 +528,7 @@ class SALM(LightningModule, HFHubMixin):
         audio_lens: torch.Tensor = None,
         generation_config: GenerationConfig = None,
         timestamps: bool = False,
+        ground_truth_texts: list[str] = None,
         **generation_kwargs,
     ) -> torch.Tensor:
         """
@@ -591,6 +592,10 @@ class SALM(LightningModule, HFHubMixin):
                 Each prompt can have multiple audios.
             audio_lens: Optional. Length of each audio example.
             generation_config: Optional HuggingFace GenerationConfig object.
+            ground_truth_texts: Optional list of ground-truth transcription strings (one per batch item).
+                When provided together with ``timestamps=True``, these texts are tokenized and used
+                for the timestamp-extraction pipeline instead of the LLM-generated tokens.
+                LLM generation is skipped entirely when this is set.
             generation_kwargs: Keyword arguments passed directly to the underlying LLM's ``generate`` method.
         """
         # Encode prompt dicts into int token ids.
@@ -632,33 +637,43 @@ class SALM(LightningModule, HFHubMixin):
             # Text-only generation.
             attention_mask = tokens != self.text_pad_id
             generation_inputs = {"input_ids": tokens, "attention_mask": attention_mask}
-        if generation_config is None:
-            generation_config = GenerationConfig(
-                bos_token_id=self.text_bos_id,
-                eos_token_id=self.text_eos_id,
-                pad_token_id=self.text_pad_id,
+        if ground_truth_texts is not None and timestamps:
+            assert audios is not None, "audios must be provided when using ground_truth_texts with timestamps"
+            assert len(ground_truth_texts) == len(audio_embeds), (
+                f"ground_truth_texts length ({len(ground_truth_texts)}) must match "
+                f"number of audio examples ({len(audio_embeds)})"
             )
-        # Generate the answers using HF Generate API.
-        # Note: we need to put the text embedding layer back to the LLM for processing.
-        with move_embedding(self):
-            #with PreSoftmaxCaptureHook(self.llm) as hook_manager:
-            original_attn_impl = self.llm.config._attn_implementation
-            self.llm.config._attn_implementation = 'eager'
-            answer_tokens = self.llm.generate(
-                **generation_inputs,
-                **generation_kwargs,
-                generation_config=generation_config,
-            )  
+            gt_token_ids_per_item = []
+            for gt_text in ground_truth_texts:
+                ids = self.tokenizer.text_to_ids(gt_text)
+                gt_token_ids_per_item.append(torch.tensor(ids, dtype=torch.long, device=self.device))
+            answer_tokens = gt_token_ids_per_item
+        else:
+            if generation_config is None:
+                generation_config = GenerationConfig(
+                    bos_token_id=self.text_bos_id,
+                    eos_token_id=self.text_eos_id,
+                    pad_token_id=self.text_pad_id,
+                )
+            with move_embedding(self):
+                original_attn_impl = self.llm.config._attn_implementation
+                self.llm.config._attn_implementation = 'eager'
+                answer_tokens = self.llm.generate(
+                    **generation_inputs,
+                    **generation_kwargs,
+                    generation_config=generation_config,
+                )
 
         if audios is None or not timestamps:
             return answer_tokens
 
         return_answer_tokens = []
-        for batch_idx in range(0,len(audio_embeds)):
-            new_tokens, new_token_ids = self.retokenize_with_separate_space(answer_tokens[batch_idx])
+        for batch_idx in range(0, len(audio_embeds)):
+            batch_token_ids = answer_tokens[batch_idx]
+            new_tokens, new_token_ids = self.retokenize_with_separate_space(batch_token_ids)
             if new_token_ids:
                 new_token_ids[0] = self.space_token_id
-            text = self.tokenizer.ids_to_text(answer_tokens[batch_idx])
+            text = self.tokenizer.ids_to_text(batch_token_ids)
             text = text.strip('!')
             text_embeds = self.embed_tokens(torch.tensor(new_token_ids, device=self.device))
             audio_and_text_embeds = torch.cat([audio_embeds[batch_idx].unsqueeze(0), text_embeds.unsqueeze(0)],dim=1)
