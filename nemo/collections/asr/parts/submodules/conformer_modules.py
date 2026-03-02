@@ -30,6 +30,7 @@ from nemo.collections.asr.parts.submodules.multi_head_attention import (
 from nemo.collections.asr.parts.utils.activations import Swish
 from nemo.collections.common.parts.utils import activation_registry
 from nemo.core.classes.mixins import AccessMixin
+from mamba_ssm.modules.mamba2 import Mamba2
 
 from nemo.utils import logging
 
@@ -84,6 +85,11 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         use_bias=True,
         use_pytorch_sdpa=False,
         use_pytorch_sdpa_backends=None,
+        use_mamba_only=False,
+        mamba_d_model=1024,
+        mamba_d_state=32,
+        mamba_expand=1,
+        use_bidirectional=False,
     ):
         super(ConformerLayer, self).__init__()
 
@@ -94,6 +100,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         self.self_attention_model = self_attention_model
         self.n_heads = n_heads
         self.fc_factor = 0.5
+        self.use_mamba_only = use_mamba_only
 
         # first feed forward module
         self.norm_feed_forward1 = LayerNorm(d_model)
@@ -111,50 +118,75 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         )
 
         # multi-headed self-attention module
+        self.use_bidirectional=use_bidirectional
         self.norm_self_att = LayerNorm(d_model)
         MHA_max_cache_len = att_context_size[0]
 
-        if self_attention_model == 'rel_pos':
-            self.self_attn = RelPositionMultiHeadAttention(
-                n_head=n_heads,
-                n_feat=d_model,
-                dropout_rate=dropout_att,
-                pos_bias_u=pos_bias_u,
-                pos_bias_v=pos_bias_v,
-                max_cache_len=MHA_max_cache_len,
-                use_bias=use_bias,
-                use_pytorch_sdpa=self.use_pytorch_sdpa,
-                use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-            )
-        elif self_attention_model == 'rel_pos_local_attn':
-            self.self_attn = RelPositionMultiHeadAttentionLongformer(
-                n_head=n_heads,
-                n_feat=d_model,
-                dropout_rate=dropout_att,
-                pos_bias_u=pos_bias_u,
-                pos_bias_v=pos_bias_v,
-                max_cache_len=MHA_max_cache_len,
-                att_context_size=att_context_size,
-                global_tokens=global_tokens,
-                global_tokens_spacing=global_tokens_spacing,
-                global_attn_separate=global_attn_separate,
-                use_bias=use_bias,
-            )
-        elif self_attention_model == 'abs_pos':
-            self.self_attn = MultiHeadAttention(
-                n_head=n_heads,
-                n_feat=d_model,
-                dropout_rate=dropout_att,
-                max_cache_len=MHA_max_cache_len,
-                use_bias=use_bias,
-                use_pytorch_sdpa=self.use_pytorch_sdpa,
-                use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-            )
+        if self.use_mamba_only:
+            if use_bidirectional:
+                # Bidirectional mode runs two independent Mamba blocks (forward + backward) over the
+                # *same* feature dimension as the Conformer layer (`d_model`), then concatenates and
+                # projects back to `d_model`. This mirrors a BiRNN-style pattern.
+                #
+                # Note: If you want `mamba_d_model != d_model`, you must add explicit input/output
+                # projections; this layer does not currently support that.
+                if mamba_d_model != d_model:
+                    raise ValueError(
+                        f"Invalid config: use_mamba_only=True and use_bidirectional=True require "
+                        f"mamba_d_model == d_model. Got mamba_d_model={mamba_d_model}, d_model={d_model}."
+                    )
+                self.mamba_attention_forward = Mamba2(d_model=d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
+                self.mamba_attention_backward = Mamba2(d_model=d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
+                self.bi_proj = torch.nn.Linear(2 * d_model, d_model)
+            else:
+                if mamba_d_model != d_model:
+                    raise ValueError(
+                        f"Invalid config: use_mamba_only=True requires mamba_d_model == d_model. "
+                        f"Got mamba_d_model={mamba_d_model}, d_model={d_model}."
+                    )
+                self.mamba_attention = Mamba2(d_model=mamba_d_model, d_state=mamba_d_state, expand=mamba_expand, layer_idx=0)
         else:
-            raise ValueError(
-                f"'{self_attention_model}' is not not a valid value for 'self_attention_model', "
-                f"valid values can be from ['rel_pos', 'rel_pos_local_attn', 'abs_pos']"
-            )
+            if self_attention_model == 'rel_pos':
+                self.self_attn = RelPositionMultiHeadAttention(
+                    n_head=n_heads,
+                    n_feat=d_model,
+                    dropout_rate=dropout_att,
+                    pos_bias_u=pos_bias_u,
+                    pos_bias_v=pos_bias_v,
+                    max_cache_len=MHA_max_cache_len,
+                    use_bias=use_bias,
+                    use_pytorch_sdpa=self.use_pytorch_sdpa,
+                    use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                )
+            elif self_attention_model == 'rel_pos_local_attn':
+                self.self_attn = RelPositionMultiHeadAttentionLongformer(
+                    n_head=n_heads,
+                    n_feat=d_model,
+                    dropout_rate=dropout_att,
+                    pos_bias_u=pos_bias_u,
+                    pos_bias_v=pos_bias_v,
+                    max_cache_len=MHA_max_cache_len,
+                    att_context_size=att_context_size,
+                    global_tokens=global_tokens,
+                    global_tokens_spacing=global_tokens_spacing,
+                    global_attn_separate=global_attn_separate,
+                    use_bias=use_bias,
+                )
+            elif self_attention_model == 'abs_pos':
+                self.self_attn = MultiHeadAttention(
+                    n_head=n_heads,
+                    n_feat=d_model,
+                    dropout_rate=dropout_att,
+                    max_cache_len=MHA_max_cache_len,
+                    use_bias=use_bias,
+                    use_pytorch_sdpa=self.use_pytorch_sdpa,
+                    use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                )
+            else:
+                raise ValueError(
+                    f"'{self_attention_model}' is not not a valid value for 'self_attention_model', "
+                    f"valid values can be from ['rel_pos', 'rel_pos_local_attn', 'abs_pos']"
+                )
 
         # second feed forward module
         self.norm_feed_forward2 = LayerNorm(d_model)
@@ -163,7 +195,7 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         self.dropout = nn.Dropout(dropout)
         self.norm_out = LayerNorm(d_model)
 
-    def forward(self, x, att_mask=None, pos_emb=None, pad_mask=None, cache_last_channel=None, cache_last_time=None, dcc_chunk=None):
+    def forward(self, x, att_mask=None, pos_emb=None, pad_mask=None, cache_last_channel=None, cache_last_time=None, dcc_chunk=None, inference_params=None):
         """
         Args:
             x (torch.Tensor): input signals (B, T, d_model)
@@ -183,17 +215,35 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         x = self.feed_forward1(x)
         residual = residual + self.dropout(x) * self.fc_factor
 
-        # import ipdb; ipdb.set_trace()
-
         x = self.norm_self_att(residual)
-        if self.self_attention_model == 'rel_pos':
-            x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)
-        elif self.self_attention_model == 'rel_pos_local_attn':
-            x = self.self_attn(query=x, key=x, value=x, pad_mask=pad_mask, pos_emb=pos_emb, cache=cache_last_channel)
-        elif self.self_attention_model == 'abs_pos':
-            x = self.self_attn(query=x, key=x, value=x, mask=att_mask, cache=cache_last_channel)
+        if self.use_mamba_only:
+            if inference_params is not None:
+                if self.use_bidirectional:
+                    # Backward-direction requires full sequence context; not supported in streaming/incremental mode.
+                    raise NotImplementedError(
+                        "Bidirectional Mamba attention does not support `inference_params`. "
+                        "Set `use_bidirectional=False` for streaming/incremental inference."
+                    )
+                x = self.mamba_attention(x, inference_params=inference_params)
+            else:
+                if self.use_bidirectional:
+                    x_fwd = self.mamba_attention_forward(x)                           # [B, T, C]
+                    x_bwd = self.mamba_attention_backward(x.flip(dims=[1]))            # [B, T, C] on reversed time
+                    x_bwd = x_bwd.flip(dims=[1])                                       # back to [B, T, C]
+
+                    x = torch.cat([x_fwd, x_bwd], dim=-1)  
+                    x = self.bi_proj(x)     
+                else:
+                    x = self.mamba_attention(x)
         else:
-            x = None
+            if self.self_attention_model == 'rel_pos':
+                x = self.self_attn(query=x, key=x, value=x, mask=att_mask, pos_emb=pos_emb, cache=cache_last_channel)
+            elif self.self_attention_model == 'rel_pos_local_attn':
+                x = self.self_attn(query=x, key=x, value=x, pad_mask=pad_mask, pos_emb=pos_emb, cache=cache_last_channel)
+            elif self.self_attention_model == 'abs_pos':
+                x = self.self_attn(query=x, key=x, value=x, mask=att_mask, cache=cache_last_channel)
+            else:
+                x = None
 
         if x is not None and cache_last_channel is not None:
             (x, cache_last_channel) = x
@@ -330,7 +380,6 @@ class ConformerConvolution(nn.Module):
         )
 
     def forward(self, x, pad_mask=None, cache=None, dcc_chunk=None):
-        
         if dcc_chunk is not None:
             
             if dcc_chunk and self.conv_context_style == "regular":

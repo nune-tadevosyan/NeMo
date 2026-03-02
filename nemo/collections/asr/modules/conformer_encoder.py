@@ -229,6 +229,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 "cache_last_time": NeuralType(('D', 'B', 'D', 'T'), ChannelType(), optional=True),
                 "cache_last_channel_len": NeuralType(tuple('B'), LengthsType(), optional=True),
                 "bypass_pre_encode": NeuralType(tuple(), BoolType(), optional=True),
+                "inference_params": NeuralType(optional=True),
             }
         )
 
@@ -334,6 +335,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         use_pytorch_sdpa: bool = False,
         use_pytorch_sdpa_backends=None,
         sync_max_audio_length: bool = True,
+        use_mamba_only: bool = False,
+        mamba_d_model: int = 512,
+        mamba_expand: int = 2 
     ):
         super().__init__()
         d_ff = d_model * ff_expansion_factor
@@ -354,6 +358,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         self.global_attn_separate = global_attn_separate
         self.global_tokens_spacing = global_tokens_spacing
         self.use_pytorch_sdpa = use_pytorch_sdpa
+        self.use_mamba_only = use_mamba_only
         if use_pytorch_sdpa_backends is None:
             use_pytorch_sdpa_backends = []
         self.use_pytorch_sdpa_backends = use_pytorch_sdpa_backends
@@ -508,6 +513,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 use_bias=use_bias,
                 use_pytorch_sdpa=self.use_pytorch_sdpa,
                 use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                use_mamba_only=use_mamba_only,
+                mamba_d_model=mamba_d_model,
+                mamba_expand=mamba_expand,
             )
             self.layers.append(layer)
 
@@ -594,6 +602,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        inference_params=None,
     ):
         """
         Forward function for the ConformerEncoder accepting an audio signal and its corresponding length.
@@ -628,6 +637,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             cache_last_time=cache_last_time,
             cache_last_channel_len=cache_last_channel_len,
             bypass_pre_encode=bypass_pre_encode,
+            inference_params=inference_params,
         )
 
     def forward_internal(
@@ -638,6 +648,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         cache_last_time=None,
         cache_last_channel_len=None,
         bypass_pre_encode=False,
+        inference_params=None,
     ):
         """
         The `audio_signal` input supports two formats depending on the `bypass_pre_encode` boolean flag.
@@ -776,6 +787,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 cache_last_channel=cache_last_channel_cur,
                 cache_last_time=cache_last_time_cur,
                 dcc_chunk=dcc_chunk,
+                inference_params=inference_params,
             )
 
             if cache_last_channel_cur is not None:
@@ -933,7 +945,6 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
                 # skip right context for some chunks with skip_att_chunk_rc_prob (only for training stage)
                 
-                # import ipdb; ipdb.set_trace()
                 if self.training and self.skip_att_chunk_rc_prob > 0.0:
                     chunks_num = max_audio_length // chunk_size_frames
                     for chunk_step in range(chunks_num):
@@ -981,7 +992,6 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
         pad_mask = ~pad_mask
 
-        # import ipdb; ipdb.set_trace()
         return pad_mask, att_mask
 
     def enable_pad_mask(self, on=True):
@@ -1134,7 +1144,6 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         else:
             sampling_frames = 0
 
-        # import pdb; pdb.set_trace()
         
         if isinstance(sampling_frames, list):
             streaming_cfg.chunk_size = [

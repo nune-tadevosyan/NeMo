@@ -25,17 +25,25 @@ from lhotse import CutSet, RecordingSet
 from lhotse.cut import Cut
 from lhotse.dataset import (
     ClippingTransform,
-    Compress,
     CutConcatenate,
     DynamicBucketingSampler,
     DynamicCutSampler,
     IterableDatasetWrapper,
-    LowpassUsingResampling,
     ReverbWithImpulseResponse,
     RoundRobinSampler,
     ZipSampler,
     make_worker_init_fn,
 )
+
+try:
+    from lhotse.dataset import Compress
+except ImportError:
+    Compress = None
+
+try:
+    from lhotse.dataset import LowpassUsingResampling
+except ImportError:
+    LowpassUsingResampling = None
 from lhotse.dataset.dataloading import resolve_seed
 from lhotse.dataset.sampling.base import CutSampler, SamplingConstraint, TimeConstraint
 from lhotse.lazy import LazyFlattener

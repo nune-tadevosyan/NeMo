@@ -50,11 +50,17 @@ python speech_to_text_streaming_infer_rnnt.py \
 import copy
 import glob
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import time
 
+sys.path.insert(0, "/lustre/fsw/portfolios/convai/users/ntadevosyan/code/dcc_dual/open_asr_leaderboard")
+from normalizer import EnglishTextNormalizer
+
+from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLayer
+from mamba_ssm.utils.generation import InferenceParams
 
 # NB: PYTORCH_CUDA_ALLOC_CONF should be set before importing pytorch / nemo
 alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
@@ -110,7 +116,17 @@ from nemo.collections.asr.parts.utils.transcribe_utils import (
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.timers import SimpleTimer
-
+def _reset_mamba_states(model) -> None:
+    """Reset cached convolution and SSM states across all Mamba-based layers."""
+    for module in model.modules():
+        # Use the Mamba2.reset_cache() API when available (resets both ssm_state and conv_state)
+        if hasattr(module, 'reset_cache') and callable(module.reset_cache):
+            module.reset_cache()
+        # Reset chunk counter on ConformerLayer mamba attention wrappers
+        if isinstance(module, ConformerLayer):
+            mamba_attention = getattr(module, "mamba_attention", None)
+            if mamba_attention is not None and hasattr(mamba_attention, "count"):
+                mamba_attention.count = 0
 
 def make_divisible_by(num, factor: int) -> int:
     """Make num divisible by factor"""
@@ -174,6 +190,7 @@ class TranscriptionConfig:
     langid: str = "en"  # specify this for convert_num_to_words step in groundtruth cleaning
     use_cer: bool = False
 
+    use_open_asr_normalization: bool = True  # apply open_asr_leaderboard English normalization
     calculate_rtfx: bool = False
 
 
@@ -239,7 +256,8 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     asr_model.to(compute_dtype)
 
     use_per_stream_biasing = cfg.use_per_stream_biasing
-
+    cfg.decoding.greedy.use_cuda_graph_decoder=False
+    cfg.decoding.beam.allow_cuda_graphs
     # Change Decoding Config
     with open_dict(cfg.decoding):
         if cfg.decoding.strategy != "greedy_batch" or cfg.decoding.greedy.loop_labels is not True:
@@ -254,12 +272,18 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
             cfg.decoding.greedy.enable_per_stream_biasing = use_per_stream_biasing
 
     set_duration = None
+    if asr_model.encoder.use_mamba_only:
+        inference_params = InferenceParams(max_seqlen=20, max_batch_size=cfg.batch_size, seqlen_offset=5)
+    else:
+        inference_params = None
     if manifest is not None:
         records = read_manifest(manifest)
         manifest_dir = Path(manifest).parent.absolute()
         # fix relative paths
         for record in records:
             record["audio_filepath"] = str(filepath_to_absolute(record["audio_filepath"], manifest_dir))
+            if record.get("duration") is None:
+                record["duration"] = librosa.get_duration(path=record["audio_filepath"])
         records = sorted(records, key=lambda x: x['duration'], reverse=True)
         set_duration = sum(float(record['duration']) for record in records)
     else:
@@ -269,7 +293,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     if cfg.sort_by_duration:
         filepath2order = dict()
         for i, record in enumerate(records):
-            if "duration" not in record:
+            if not record.get("duration"):
                 record["duration"] = librosa.get_duration(path=record["audio_filepath"])
             filepath2order[record["audio_filepath"]] = i
         records.sort(key=lambda record: record["duration"], reverse=True)
@@ -372,6 +396,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         for audio_data in tqdm(audio_dataloader):
             # get audio
             # NB: preprocessor runs on torch.float32, no need to cast dtype here
+            _reset_mamba_states(asr_model)
             audio_batch = audio_data.audio_signals.to(device=map_location)
             audio_batch_lengths = audio_data.audio_signal_lengths.to(device=map_location)
             batch_size = audio_batch.shape[0]
@@ -429,6 +454,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 encoder_output, encoder_output_len = asr_model(
                     input_signal=buffer.samples,
                     input_signal_length=buffer.context_size_batch.total(),
+                    inference_params = inference_params
                 )
                 encoder_output = encoder_output.transpose(1, 2)  # [B, T, C]
                 # remove extra context from encoder_output (leave only frames corresponding to the chunk)
@@ -486,8 +512,17 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
             )
             all_hyps[i] = hyp
 
+    # apply open_asr_leaderboard English normalization
+    if cfg.use_open_asr_normalization:
+        en_normalizer = EnglishTextNormalizer()
+        logging.info("Applying open_asr_leaderboard English text normalization to predictions and references")
+        for i, hyp in enumerate(all_hyps):
+            hyp.text = en_normalizer(hyp.text)
+        for record in records:
+            if "text" in record:
+                record["norm_text"] = en_normalizer(record["text"])
+
     # write predictions to outputfile
-    # import ipdb; ipdb.set_trace()
     import json
     output_filename = cfg.output_filename
     Path(output_filename).parent.mkdir(parents=True, exist_ok=True)
@@ -522,8 +557,10 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         logging.info(f"RTFx: {rtfx:.2f}")
 
     if cfg.calculate_wer:
+        gt_text_attr = "norm_text" if cfg.use_open_asr_normalization else "text"
         output_manifest_w_wer, total_res, _ = cal_write_wer(
             pred_manifest=output_filename,
+            gt_text_attr_name=gt_text_attr,
             pred_text_attr_name=pred_text_attr_name,
             clean_groundtruth_text=cfg.clean_groundtruth_text,
             langid=cfg.langid,
