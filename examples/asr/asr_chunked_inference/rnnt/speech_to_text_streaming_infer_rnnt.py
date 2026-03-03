@@ -157,9 +157,10 @@ class TranscriptionConfig:
     # Chunked configs
     chunk_secs: float = 2  # Chunk length in seconds
     left_context_secs: float = (
-        10.0  # left context: larger value improves quality without affecting theoretical latency
+        5.6  # left context: larger value improves quality without affecting theoretical latency
     )
     right_context_secs: float = 2  # right context
+    use_mamba_cache: bool = False  # enable Mamba SSM/conv state caching across chunks
     
     att_context_size_as_chunk: bool = True  # whether to use the att_context_size as chunk size
 
@@ -272,10 +273,13 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
             cfg.decoding.greedy.enable_per_stream_biasing = use_per_stream_biasing
 
     set_duration = None
-    if asr_model.encoder.use_mamba_only:
-        inference_params = InferenceParams(max_seqlen=20, max_batch_size=cfg.batch_size, seqlen_offset=5)
+    if asr_model.encoder.use_mamba_only and cfg.use_mamba_cache:
+        inference_params = InferenceParams(max_seqlen=2048, max_batch_size=cfg.batch_size, seqlen_offset=0)
+        logging.info("Mamba cache enabled: SSM/conv states will carry across chunks")
     else:
         inference_params = None
+        if asr_model.encoder.use_mamba_only:
+            logging.info("Mamba cache disabled (use_mamba_cache=False): each chunk processed independently")
     if manifest is not None:
         records = read_manifest(manifest)
         manifest_dir = Path(manifest).parent.absolute()
@@ -284,7 +288,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
             record["audio_filepath"] = str(filepath_to_absolute(record["audio_filepath"], manifest_dir))
             if record.get("duration") is None:
                 record["duration"] = librosa.get_duration(path=record["audio_filepath"])
-        records = sorted(records, key=lambda x: x['duration'], reverse=True)
+        records = sorted(records, key=lambda x: x['duration'] if x['duration'] is not None else 0.0, reverse=True)
         set_duration = sum(float(record['duration']) for record in records)
     else:
         assert filepaths is not None
@@ -333,6 +337,9 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     latency_secs = (context_samples.chunk + context_samples.right) / audio_sample_rate
     logging.info(f"Theoretical latency: {latency_secs:.2f} seconds")
 
+    if inference_params is not None:
+        inference_params.right_context_len = context_encoder_frames.right
+        logging.info(f"Mamba right_context_len set to {context_encoder_frames.right} encoder frames")
     biasing_requests: list[BiasingRequestItemConfig | None] | None
     if use_per_stream_biasing:
         biasing_requests = [

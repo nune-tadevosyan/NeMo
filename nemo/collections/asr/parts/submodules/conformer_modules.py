@@ -224,7 +224,22 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
                         "Bidirectional Mamba attention does not support `inference_params`. "
                         "Set `use_bidirectional=False` for streaming/incremental inference."
                     )
-                x = self.mamba_attention(x, inference_params=inference_params)
+                left_ctx_len = getattr(inference_params, 'left_context_len', 0)
+                right_ctx_len = getattr(inference_params, 'right_context_len', 0)
+                T = x.shape[1]
+                start = left_ctx_len
+                end = T - right_ctx_len if right_ctx_len > 0 else T
+                if start > 0 or end < T:
+                    x_chunk = self.mamba_attention(x[:, start:end], inference_params=inference_params)
+                    parts = []
+                    if start > 0:
+                        parts.append(x.new_zeros(x.shape[0], start, x.shape[2]))
+                    parts.append(x_chunk)
+                    if end < T:
+                        parts.append(x.new_zeros(x.shape[0], T - end, x.shape[2]))
+                    x = torch.cat(parts, dim=1)
+                else:
+                    x = self.mamba_attention(x, inference_params=inference_params)
             else:
                 if self.use_bidirectional:
                     x_fwd = self.mamba_attention_forward(x)                           # [B, T, C]
