@@ -536,6 +536,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         encoded = encoder_output[0]
         encoded_len = encoder_output[1]
         log_probs = self.decoder(encoder_output=encoded)
+        encoded_len = encoded_len * self.decoder.upsampling_factor
         greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
 
         return (

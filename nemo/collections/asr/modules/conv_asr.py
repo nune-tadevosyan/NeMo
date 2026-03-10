@@ -521,6 +521,12 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         return cfg
 
     @property
+    def upsampling_factor(self) -> int:
+        if not self.upscale:
+            return 1
+        return 4 if self.two_layer else 2
+
+    @property
     def vocabulary(self):
         return self.__vocabulary
 
