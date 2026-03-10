@@ -52,6 +52,7 @@ Transcribe audio file on a single CPU/GPU. Useful for transcription of moderate 
   dataset_manifest: path to dataset JSON manifest file (in NeMo formats
   compute_langs: Bool to request language ID information (if the model supports it)
   timestamps: Bool to request greedy time stamp information (if the model supports it) by default None 
+  enable_chunking: Bool to enable chunking for long audio files (default: False)
 
   (Optionally: You can limit the type of timestamp computations using below overrides)
   ctc_decoding.ctc_timestamp_type="all"  # (default all, can be [all, char, word, segment])

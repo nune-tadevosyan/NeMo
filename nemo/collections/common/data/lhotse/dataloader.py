@@ -39,6 +39,7 @@ from lhotse.dataset import (
 )
 from lhotse.dataset.dataloading import resolve_seed
 from lhotse.dataset.sampling.base import CutSampler, SamplingConstraint, TimeConstraint
+
 from lhotse.lazy import LazyFlattener
 from lhotse.utils import fastcopy, fix_random_seed
 from omegaconf import DictConfig, OmegaConf
@@ -181,7 +182,13 @@ class LhotseDataLoadingConfig:
     #           (define hop for overlapping windows)
     cut_into_windows_duration: Optional[float] = None  # set this to enable
     cut_into_windows_hop: Optional[float] = None
-    #       III) common options
+    #       III) cut_into_windows_balanced: like cut_into_windows but with optimal last-chunk sizing.
+    #            Applied after cut_into_windows. Replaces dataset-level chunk_audio_sample calls.
+    #            Requires cut_into_windows_duration to be set (for the coarse outer windowing).
+    cut_into_windows_balanced_min_duration: Optional[float] = None  # set this to enable
+    cut_into_windows_balanced_max_duration: Optional[float] = None
+    cut_into_windows_balanced_overlap: float = 1.0
+    #       V) common options
     keep_excessive_supervisions: bool = (
         True  # when a cut is truncated in the middle of a supervision, should we keep them.
     )
@@ -589,6 +596,15 @@ def get_lhotse_sampler_from_config(config, global_rank, world_size, tokenizer=No
         cuts = cuts.cut_into_windows(
             duration=config.cut_into_windows_duration,
             hop=config.cut_into_windows_hop,
+            keep_excessive_supervisions=config.keep_excessive_supervisions,
+        )
+
+    use_grouped_sampler = config.cut_into_windows_balanced_min_duration is not None
+    if use_grouped_sampler:
+        cuts = cuts.cut_into_windows_balanced(
+            min_duration=config.cut_into_windows_balanced_min_duration,
+            max_duration=config.cut_into_windows_balanced_max_duration,
+            overlap=config.cut_into_windows_balanced_overlap,
             keep_excessive_supervisions=config.keep_excessive_supervisions,
         )
 

@@ -97,9 +97,14 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
             config['use_lhotse'] = True
-            # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
+            # Coarse 1-hour outer windowing so very long files don't OOM.
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
+            # Fine overlapping chunking within each 1-hour window (lhotse-side).
+            chunk_range = config.get("chunk_range", [30, 40])
+            config.cut_into_windows_balanced_min_duration = chunk_range[0]
+            config.cut_into_windows_balanced_max_duration = chunk_range[1]
+            config.cut_into_windows_balanced_overlap = 1.0
 
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(

@@ -68,17 +68,8 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
                     )
 
         base_tokens = [_tokens_from_cut(cut) for cut in cuts]
-    
-        if self.enable_chunking:
-            # Avoid circular imports
-            from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
-            audio, audio_lens = chunk_audio_sample(audio=audio, audio_lens=audio_lens, chunk_range=[240, 300])
-            tokens = base_tokens * len(audio)
-            # This check will allow to gather the audio from different batches
-            if cuts[0].start != 0:
-                cuts[0].id = cuts[0].id + '_cut_segmented'
-        else:
-            tokens = base_tokens
+
+        tokens = base_tokens
 
         token_lens = torch.tensor([t.size(0) for t in tokens], dtype=torch.long)
         tokens = collate_vectors(tokens, padding_value=0)

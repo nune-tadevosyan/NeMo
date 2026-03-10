@@ -241,8 +241,10 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
         if trcfg.enable_chunking:
-            if cuts is not None and hasattr(cuts[0], 'id'):
-                cut_id = cuts[0].id
+            if cuts is not None:
+                source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
+                source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
+                cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
             else:
                 cut_id = f'audio_{uuid.uuid4().int}'
         # CTC path: use vocabulary when no tokenizer (character-based).

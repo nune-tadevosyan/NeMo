@@ -590,9 +590,15 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         world_size = config.get("world_size", self.world_size)
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
-            # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
+            # Coarse 1-hour outer windowing so very long files don't OOM.
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
+            # Fine overlapping chunking within each 1-hour window (lhotse-side).
+            # AED models process longer context, so default chunk range is 240-300 s.
+            chunk_range = config.get("chunk_range", [30, 40])
+            config.cut_into_windows_balanced_min_duration = chunk_range[0]
+            config.cut_into_windows_balanced_max_duration = chunk_range[1]
+            config.cut_into_windows_balanced_overlap = 1.0
         return get_lhotse_dataloader_from_config(
             config,
             global_rank=global_rank,
@@ -1038,7 +1044,13 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         # Determine the cut id to inject into hypotheses for chunking
         if trcfg.enable_chunking or trcfg.timestamps:
             if isinstance(batch, PromptedAudioToTextMiniBatch):
-                cut_id = batch.cuts[0].id
+                cuts = batch.cuts
+                if cuts is not None:
+                    source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
+                    source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
+                    cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
+                else:
+                    cut_id = f'audio_{uuid.uuid4().int}'
                 audio = batch.audio
                 audio_lens = batch.audio_lens
             else:  # TensorDataset / external DataLoader tuple type batch

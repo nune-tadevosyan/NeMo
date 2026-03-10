@@ -482,9 +482,14 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
             config['use_lhotse'] = True
-            # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
+            # Coarse 1-hour outer windowing so very long files don't OOM.
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
+            # Fine overlapping chunking within each 1-hour window (lhotse-side).
+            chunk_range = config.get("chunk_range", [30, 40])
+            config.cut_into_windows_balanced_min_duration = chunk_range[0]
+            config.cut_into_windows_balanced_max_duration = chunk_range[1]
+            config.cut_into_windows_balanced_overlap = 1.0
 
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(
@@ -983,8 +988,10 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 hyp, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
         if trcfg.enable_chunking:
-            if cuts is not None and hasattr(cuts[0], 'id'):
-                cut_id = cuts[0].id
+            if cuts is not None:
+                source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
+                source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
+                cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
             else:
                 cut_id = f'audio_{uuid.uuid4().int}'
         if trcfg.enable_chunking and len(hyp) > 1:
