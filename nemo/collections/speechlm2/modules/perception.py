@@ -43,16 +43,15 @@ class AudioPerceptionModule(NeuralModule, Exportable):
         self.cfg = cfg
         self.preprocessor = self.from_config_dict(cfg.preprocessor)
         encoder = self.from_config_dict(cfg.encoder)
-        if isinstance(self.modality_adapter, (QformerConnector, MultiLayerProjectionConnector)):
-            self.encoder_multilayer = ConformerMultiLayerFeatureExtractor(encoder, layer_idx_list=cfg.modality_adapter.target_layer_ids, detach=False, convert_to_cpu=False,)
-        else:
-            self.encoder = encoder
-
         if 'spec_augment' in cfg and cfg.spec_augment is not None:
             self.spec_augmentation = self.from_config_dict(cfg.spec_augment)
         else:
             self.spec_augmentation = None
         self.modality_adapter = self.from_config_dict(cfg.modality_adapter)
+        if isinstance(self.modality_adapter, (QformerConnector, MultiLayerProjectionConnector)):
+            self.encoder_multilayer = ConformerMultiLayerFeatureExtractor(encoder, layer_idx_list=cfg.modality_adapter.target_layer_ids, detach=False, convert_to_cpu=False,)
+        else:
+            self.encoder = encoder
         if 'output_dim' not in cfg.modality_adapter and "d_model" in cfg.modality_adapter:  # e.g., conformer encoder
             self.proj = nn.Linear(cfg.modality_adapter.d_model, cfg.output_dim)
         else:
@@ -164,6 +163,10 @@ class AudioTranscriptionPerceptionModule(NeuralModule, Exportable):
         if 'spec_augment' in cfg and cfg.spec_augment is not None:
             self.spec_augmentation = self.from_config_dict(cfg.spec_augment)
         self.modality_adapter = self.from_config_dict(cfg.modality_adapter)
+        if isinstance(self.modality_adapter, (QformerConnector, MultiLayerProjectionConnector)):
+            self.encoder_multilayer = ConformerMultiLayerFeatureExtractor(
+                self.asr.encoder, layer_idx_list=cfg.modality_adapter.target_layer_ids, detach=False, convert_to_cpu=False,
+            )
         if 'output_dim' not in cfg.modality_adapter and "d_model" in cfg.modality_adapter:  # e.g., conformer encoder
             self.proj = nn.Linear(cfg.modality_adapter.d_model, cfg.output_dim)
         else:
