@@ -39,6 +39,7 @@ from lhotse.dataset import (
 )
 from lhotse.dataset.dataloading import resolve_seed
 from lhotse.dataset.sampling.base import CutSampler, SamplingConstraint, TimeConstraint
+from lhotse.dataset.sampling.grouped import GroupedCutSampler
 
 from lhotse.lazy import LazyFlattener
 from lhotse.utils import fastcopy, fix_random_seed
@@ -635,7 +636,17 @@ def get_lhotse_sampler_from_config(config, global_rank, world_size, tokenizer=No
     cuts, constraint = determine_sampling_constraint(cuts, bucket_duration_bins, config)
 
     # 3. The sampler.
-    if config.use_bucketing:
+    if use_grouped_sampler:
+        # Chunked long-audio mode: all sub-cuts from the same parent cut (1-hour window)
+        # must arrive as one batch so merge_chunked_hypotheses can stitch them back.
+        logging.info("Creating a Lhotse GroupedCutSampler (chunked long-audio mode)")
+        sampler = GroupedCutSampler(
+            cuts,
+            group_by="source_cut_id",
+            rank=0 if use_iterable_dataset else global_rank,
+            world_size=1 if use_iterable_dataset else world_size,
+        )
+    elif config.use_bucketing:
         # Bucketing. Some differences from NeMo's native bucketing:
         #    - we can tweak the number of buckets and bucket duration bins using the configuration
         #    - batch size is dynamic and configurable via a single param: max_duration (config: batch_duration)

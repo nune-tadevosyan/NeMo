@@ -98,20 +98,17 @@ def get_value_from_transcription_config(trcfg, key, default):
 def resolve_chunking(
     audio: Union[str, List[str], np.ndarray, torch.Tensor, DataLoader],
     enable_chunking: bool,
-    batch_size: int,
 ) -> bool:
     """
-    Determine whether chunking should be enabled for transcription based on input constraints.
+    Determine whether chunking should be enabled for transcription.
 
     Chunking is enabled when:
     - User requested it (enable_chunking=True), AND
-    - Input is not a DataLoader, AND
-    - Either a single audio input is provided OR batch_size is 1
+    - Input is not an external DataLoader (chunking is set up inside _setup_transcribe_dataloader)
 
     Args:
         audio: Audio input (file path, list of paths, tensor, array, or DataLoader).
         enable_chunking: Whether chunking was requested.
-        batch_size: Batch size for transcription.
 
     Returns:
         True if chunking should be enabled, False otherwise.
@@ -122,42 +119,7 @@ def resolve_chunking(
     if isinstance(audio, DataLoader):
         return False
 
-    if  batch_size == 1 or _is_single_audio(audio):
-        return True
-
-    logging.warning("Chunking is disabled. Please pass a single audio file or set batch_size to 1.")
-    return False
-
-
-def _is_single_audio(
-    audio: Union[str, List[str], Tuple[str, ...], np.ndarray, torch.Tensor, DataLoader]
-) -> bool:
-    """Check if the audio input represents a single audio sample."""
-    # String input (file path or manifest)
-    if isinstance(audio, str):
-        if audio.endswith((".json", ".jsonl")):
-            try:
-                with open(audio, "r", encoding="utf-8") as f:
-                    count = sum(1 for line in f if line.strip())
-                    return count == 1
-            except OSError as e:
-                logging.warning(f"Failed to inspect manifest '{audio}': {e}")
-                return False
-        return True
-
-    # List/tuple of paths or tensors
-    if isinstance(audio, (list, tuple)):
-        return len(audio) == 1
-
-    # Tensor or array - single if 1D or batch dimension is 1
-    if isinstance(audio, (torch.Tensor, np.ndarray)):
-        return audio.ndim == 1 or audio.shape[0] == 1
-
-    # DataLoader - cannot determine without iterating
-    if isinstance(audio, DataLoader):
-        return False
-
-    return False
+    return True
 
 
 class TranscriptionTensorDataset(Dataset):
@@ -439,11 +401,13 @@ class TranscriptionMixin(ABC):
         if type(transcribe_cfg).__name__ in ('ClassificationInferConfig', 'RegressionInferConfig'):
             transcribe_cfg.enable_chunking = False
         else:
-            transcribe_cfg.enable_chunking = resolve_chunking(
-                audio=audio,
-                enable_chunking=transcribe_cfg.enable_chunking,
-                batch_size=transcribe_cfg.batch_size,
-            ) and self._is_chunking_compatible_decoding()
+            transcribe_cfg.enable_chunking = (
+                resolve_chunking(
+                    audio=audio,
+                    enable_chunking=transcribe_cfg.enable_chunking,
+                )
+                and self._is_chunking_compatible_decoding()
+            )
         # Hold the results here
         results = None  # type: GenericTranscriptionType
         try:

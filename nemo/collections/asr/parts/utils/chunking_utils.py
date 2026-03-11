@@ -347,9 +347,9 @@ def merge_chunked_hypotheses(
         else:
             if hypotheses[0].text != '':
                 logging.warning("Cannot provide reliable timestamps for the current audio file.")
-            merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer)
+            merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer) or []
     else:
-        merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer)
+        merged_tokens = _get_token_ids(hypotheses[0], return_hypotheses, timestamps, lang_id, tokenizer) or []
 
     # avoid circular import
     from nemo.collections.asr.parts.utils.streaming_utils import lcs_alignment_merge_buffer
@@ -363,9 +363,9 @@ def merge_chunked_hypotheses(
             else:
                 if hypotheses[0].text != '':
                     logging.warning("Cannot provide reliable timestamps for the current audio file.")
-                data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer)
+                data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer) or []
         else:
-            data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer)
+            data = _get_token_ids(hypotheses[i], return_hypotheses, timestamps, lang_id, tokenizer) or []
         merged_tokens = lcs_alignment_merge_buffer(
             buffer=merged_tokens,
             data=data[: int(delay * 0.6)],  # only approximately 60% of the frames have corresponding tokens
