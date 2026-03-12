@@ -1022,6 +1022,94 @@ def join_char_level_timestamps(
     return char_timestamps
 
 
+def merge_flat_chunk_hypotheses(
+    hypotheses_list,
+    timestamps,
+    tokenizer=None,
+    subsampling_factor=None,
+    window_stride=None,
+    vocabulary=None,
+    return_hypotheses=False,
+):
+    """
+    Merge a flat list of individual per-chunk hypotheses into one hypothesis per source utterance.
+
+    Each hypothesis must carry attributes stamped by ``_transcribe_output_processing``:
+
+    * ``id``            – source cut ID (groups chunks of the same utterance)
+    * ``chunk_start``   – start offset of the chunk within its parent (used for ordering)
+    * ``_encoded_len``  – encoder output length for this chunk (scalar int/float)
+    * ``_timestamps_type`` – the original timestamp type before it was overridden to 'char'
+
+    Hypotheses without an ``id`` attribute are returned as-is.
+
+    Args:
+        hypotheses_list: Flat list of Hypothesis objects from all batches.
+        timestamps: True if timestamps are enabled.
+        tokenizer: Optional BPE tokenizer.
+        subsampling_factor: Encoder subsampling factor.
+        window_stride: Preprocessor window stride.
+        vocabulary: Optional character vocabulary (for char-based models without tokenizer).
+        return_hypotheses: Whether return_hypotheses mode is active.
+
+    Returns:
+        List[Hypothesis]: One merged hypothesis per unique ``id``, preserving original ordering
+        of first-seen IDs. Ready to be passed to ``merge_all_hypotheses``.
+    """
+    # Stable sort: primary key = id (string), secondary key = chunk_start.
+    # Use str() so integer ids (from tests) also sort consistently.
+    sorted_hyps = sorted(
+        hypotheses_list,
+        key=lambda h: (str(getattr(h, 'id', '')), float(getattr(h, 'chunk_start', 0))),
+    )
+
+    # Group while preserving order of first appearance.
+    groups: dict = {}
+    for h in sorted_hyps:
+        gid = getattr(h, 'id', None)
+        if gid not in groups:
+            groups[gid] = []
+        groups[gid].append(h)
+
+    merged_list = []
+    for gid, group in groups.items():
+        if gid is None:
+            merged_list.extend(group)
+            continue
+
+        if len(group) == 1:
+            h = group[0]
+            if timestamps:
+                timestamps_type = getattr(h, '_timestamps_type', None)
+                h = update_timestamps(
+                    h,
+                    tokenizer=tokenizer,
+                    timestamps_type=timestamps_type,
+                    vocabulary=vocabulary,
+                    lang_id=getattr(h, '_lang_id', None),
+                )
+            merged_list.append(h)
+        else:
+            timestamps_type = getattr(group[0], '_timestamps_type', None)
+            encoded_len = torch.tensor([int(getattr(h, '_encoded_len', 0)) for h in group])
+            merged = merge_chunked_hypotheses(
+                hypotheses=group,
+                encoded_len=encoded_len,
+                timestamps=timestamps,
+                tokenizer=tokenizer,
+                subsampling_factor=subsampling_factor,
+                window_stride=window_stride,
+                timestamps_type=timestamps_type,
+                lang_id=getattr(group[0], '_lang_id', None),
+                vocabulary=vocabulary,
+                return_hypotheses=return_hypotheses,
+            )
+            setattr(merged, 'id', gid)
+            merged_list.append(merged)
+
+    return merged_list
+
+
 def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
     """
     Normalize hypothesis IDs so that segmented continuations share the same group ID.

@@ -371,24 +371,16 @@ def test_resolve_chunking_single_entry_manifest_enables(tmp_path):
 
 @pytest.mark.unit
 def test_resolve_chunking_batch_size_one_enables():
-    """Test that resolve_chunking returns True when batch_size=1 even with multiple inputs."""
+    """Test that resolve_chunking returns True for multiple inputs with batch_size=1."""
     result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=1)
     assert result is True
 
 
 @pytest.mark.unit
-def test_resolve_chunking_disabled_multiple_inputs(monkeypatch):
-    """Test that resolve_chunking disables chunking for multiple inputs with batch_size > 1."""
-    from nemo.collections.asr.parts.mixins import transcription as transcription_module
-
-    warnings = []
-    monkeypatch.setattr(transcription_module.logging, 'warning', lambda message: warnings.append(message))
-
+def test_resolve_chunking_multiple_inputs_any_batch_size():
+    """DynamicCutSampler supports any batch_size; chunking is not disabled for batch_size > 1."""
     result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=2)
-
-    assert result is False
-    assert warnings, "Expected chunking warning for batch size > 1."
-    assert 'Chunking is disabled' in warnings[0]
+    assert result is True
 
 
 @pytest.mark.unit

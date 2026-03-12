@@ -29,6 +29,7 @@ from tqdm import tqdm
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment, ChannelSelectorType
 from nemo.collections.asr.parts.utils import manifest_utils
+from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses, merge_flat_chunk_hypotheses
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging, logging_mode
@@ -98,6 +99,7 @@ def get_value_from_transcription_config(trcfg, key, default):
 def resolve_chunking(
     audio: Union[str, List[str], np.ndarray, torch.Tensor, DataLoader],
     enable_chunking: bool,
+    batch_size: int = 1,
 ) -> bool:
     """
     Determine whether chunking should be enabled for transcription.
@@ -106,9 +108,13 @@ def resolve_chunking(
     - User requested it (enable_chunking=True), AND
     - Input is not an external DataLoader (chunking is set up inside _setup_transcribe_dataloader)
 
+    With the DynamicCutSampler-based pipeline, any batch_size is supported: chunks from
+    different utterances may be interleaved across batches and are merged post-inference.
+
     Args:
         audio: Audio input (file path, list of paths, tensor, array, or DataLoader).
         enable_chunking: Whether chunking was requested.
+        batch_size: Batch size (accepted for API compatibility; no longer restricts chunking).
 
     Returns:
         True if chunking should be enabled, False otherwise.
@@ -405,6 +411,7 @@ class TranscriptionMixin(ABC):
                 resolve_chunking(
                     audio=audio,
                     enable_chunking=transcribe_cfg.enable_chunking,
+                    batch_size=transcribe_cfg.batch_size,
                 )
                 and self._is_chunking_compatible_decoding()
             )
@@ -460,10 +467,32 @@ class TranscriptionMixin(ABC):
         except StopIteration:
             pass
         if transcribe_cfg.enable_chunking and isinstance(results, list):
+            _timestamps = override_config.timestamps if override_config is not None else timestamps
+            _subsampling = self.encoder.subsampling_factor if hasattr(self.encoder, 'subsampling_factor') else 8
+            _window_stride = (
+                self.cfg['preprocessor']['window_stride']
+                if hasattr(self, 'cfg') and 'preprocessor' in self.cfg
+                else None
+            )
+            # Vocabulary for char-based models (RNNT: joint.vocabulary, CTC: decoder.vocabulary)
+            _vocabulary = getattr(getattr(self, 'joint', None), 'vocabulary', None) or getattr(
+                getattr(self, 'decoder', None), 'vocabulary', None
+            )
+            # Step 1: merge chunks within each source utterance/window using LCS
+            results = merge_flat_chunk_hypotheses(
+                hypotheses_list=results,
+                timestamps=_timestamps,
+                tokenizer=getattr(self, 'tokenizer', None),
+                subsampling_factor=_subsampling,
+                window_stride=_window_stride,
+                vocabulary=_vocabulary,
+                return_hypotheses=transcribe_cfg.return_hypotheses,
+            )
+            # Step 2: concatenate 1-hour windows of the same recording
             results = merge_all_hypotheses(
                 hypotheses_list=results,
-                timestamps=(override_config.timestamps if override_config is not None else timestamps),
-                subsampling_factor=self.encoder.subsampling_factor if hasattr(self.encoder, 'subsampling_factor') else 8,
+                timestamps=_timestamps,
+                subsampling_factor=_subsampling,
             )
         return results
 

@@ -1029,32 +1029,24 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         decoder_input_ids = outputs.pop('decoder_input_ids') 
         batch = outputs.pop('batch')
         del log_probs
-        num_chunks = enc_states.shape[0]
-        # Repeat decoder_input_ids to match number of chunks
-        if trcfg.enable_chunking and num_chunks > decoder_input_ids.shape[0]:
-            decoder_input_ids = decoder_input_ids.repeat(num_chunks, 1)
         hypotheses = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
             decoder_input_ids=decoder_input_ids,
             return_hypotheses=trcfg.return_hypotheses,
         )
-        merge_to_be_done = trcfg.enable_chunking and len(hypotheses) > 1
         del enc_states, enc_mask, decoder_input_ids
-        # Determine the cut id to inject into hypotheses for chunking
+
+        # Resolve per-cut metadata (cuts, audio, lang_id) for chunking / timestamps
+        cuts = None
+        audio = None
+        audio_lens = None
         if trcfg.enable_chunking or trcfg.timestamps:
             if isinstance(batch, PromptedAudioToTextMiniBatch):
                 cuts = batch.cuts
-                if cuts is not None:
-                    source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
-                    source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
-                    cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
-                else:
-                    cut_id = f'audio_{uuid.uuid4().int}'
                 audio = batch.audio
                 audio_lens = batch.audio_lens
             else:  # TensorDataset / external DataLoader tuple type batch
-                cut_id = f'audio_{uuid.uuid4().int}'
                 audio = batch[0]
                 audio_lens = batch[1]
 
@@ -1064,30 +1056,34 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 batch_size=len(audio),
                 external_ctc_model=self.timestamps_asr_model,
                 main_model_predictions=hypotheses,
-                timestamp_type='char' if merge_to_be_done else ['word', 'segment'],
+                timestamp_type='char' if trcfg.enable_chunking else ['word', 'segment'],
                 viterbi_device=trcfg._internal.device,
             )
         elif trcfg.timestamps:
             hypotheses = process_aed_timestamp_outputs(
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
-        
-        if merge_to_be_done:
-            merged_hypotheses = merge_chunked_hypotheses(
-                hypotheses=hypotheses,
-                encoded_len=encoded_len,
-                timestamps=trcfg.timestamps,
-                tokenizer=self.tokenizer,
-                subsampling_factor=self.encoder.subsampling_factor,
-                window_stride=self.cfg['preprocessor']['window_stride'],
-                lang_id=lang_id
-            )
-            # Inject the id of the cut to hypotheses to later be used for separate batches
-            setattr(merged_hypotheses, 'id', cut_id)
-            return [merged_hypotheses]
+
         if trcfg.enable_chunking:
-            for hyp in hypotheses:
-                setattr(hyp, 'id', cut_id)
+            # Stamp each hypothesis with chunk metadata for post-inference merge
+            for j, hyp in enumerate(hypotheses):
+                if cuts is not None:
+                    cut = cuts[j]
+                    source_id = (cut.custom or {}).get("source_cut_id", cut.id)
+                    chunk_start = (cut.custom or {}).get("source_cut_start", 0)
+                    lang_id = (
+                        cut.supervisions[0].language
+                        if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) and cut.supervisions
+                        else None
+                    )
+                else:
+                    source_id = f'audio_{uuid.uuid4().int}'
+                    chunk_start = 0
+                    lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
+                setattr(hyp, 'id', source_id)
+                setattr(hyp, 'chunk_start', chunk_start)
+                setattr(hyp, '_encoded_len', encoded_len[j].item())
+                setattr(hyp, '_lang_id', lang_id)
         return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
@@ -1111,8 +1107,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         else:
             # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
-            batch_size = min(config['batch_size'], len(config['paths2audio_files']))
-        enable_chunking = config.get('enable_chunking', False) 
+            enable_chunking = config.get('enable_chunking', False)
+            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
+        enable_chunking = config.get('enable_chunking', False)
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,

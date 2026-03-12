@@ -988,38 +988,23 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 hyp, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
         if trcfg.enable_chunking:
-            if cuts is not None:
-                source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
-                source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
-                cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
-            else:
-                cut_id = f'audio_{uuid.uuid4().int}'
-        if trcfg.enable_chunking and len(hyp) > 1:
-            merged_hypotheses = merge_chunked_hypotheses(
-                hypotheses=hyp,
-                encoded_len=encoded_len,
-                timestamps=trcfg.timestamps,
-                tokenizer=getattr(self, 'tokenizer', None),
-                subsampling_factor=self.encoder.subsampling_factor,
-                window_stride=self.cfg['preprocessor']['window_stride'],
-                timestamps_type=final_timestamps_type,
-                vocabulary=getattr(self.joint, 'vocabulary', None),
-            )
-            # Inject the id of the cut to hypothesis to later be used for separate batches
-            setattr(merged_hypotheses, 'id', cut_id)
-            return [merged_hypotheses]
-        
-        elif trcfg.enable_chunking:
-            single_hypothesis = hyp[0]
-            if trcfg.timestamps:
-                single_hypothesis = update_timestamps(
-                    single_hypothesis,
-                    tokenizer=getattr(self, 'tokenizer', None),
-                    timestamps_type=final_timestamps_type,
-                    vocabulary=getattr(self.joint, 'vocabulary', None),
-                )
-            setattr(single_hypothesis, 'id', cut_id)
-            return [single_hypothesis]
+            # Restore the timestamp type that was temporarily overridden to 'char'
+            if final_timestamps_type is not None:
+                self.decoding.cfg.rnnt_timestamp_type = final_timestamps_type
+            # Stamp each hypothesis with chunk metadata for post-inference merge
+            for j, h in enumerate(hyp):
+                if cuts is not None:
+                    cut = cuts[j]
+                    source_id = (cut.custom or {}).get("source_cut_id", cut.id)
+                    chunk_start = (cut.custom or {}).get("source_cut_start", 0)
+                else:
+                    source_id = f'audio_{uuid.uuid4().int}'
+                    chunk_start = 0
+                setattr(h, 'id', source_id)
+                setattr(h, 'chunk_start', chunk_start)
+                setattr(h, '_encoded_len', encoded_len[j].item())
+                setattr(h, '_timestamps_type', final_timestamps_type)
+            return hyp
         else:
             return hyp
 
@@ -1045,7 +1030,9 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             batch_size = config['batch_size']
         else:
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
-            batch_size = min(config['batch_size'], len(config['paths2audio_files']))
+            enable_chunking = config.get('enable_chunking', False)
+            # With chunking, chunks vastly outnumber input files; always use the requested batch_size.
+            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
 
         dl_config = {
             'manifest_filepath': manifest_filepath,
