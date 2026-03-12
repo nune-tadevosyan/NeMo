@@ -1056,16 +1056,15 @@ def merge_flat_chunk_hypotheses(
         List[Hypothesis]: One merged hypothesis per unique ``id``, preserving original ordering
         of first-seen IDs. Ready to be passed to ``merge_all_hypotheses``.
     """
-    # Stable sort: primary key = id (string), secondary key = chunk_start.
-    # Use str() so integer ids (from tests) also sort consistently.
-    sorted_hyps = sorted(
-        hypotheses_list,
-        key=lambda h: (str(getattr(h, 'id', '')), float(getattr(h, 'chunk_start', 0))),
-    )
-
-    # Group while preserving order of first appearance.
+    # Group in order of first appearance, preserving the manifest order that the
+    # sampler produces.  Do NOT sort globally by str(id): transcribe_speech presorts
+    # the manifest by duration and restore_transcription_order expects results back
+    # in that same presorted order.  A global alphabetical sort on string IDs would
+    # scramble that ordering.
+    # Within each group we sort by chunk_start so that LCS merge sees chunks in
+    # temporal order.
     groups: dict = {}
-    for h in sorted_hyps:
+    for h in hypotheses_list:
         gid = getattr(h, 'id', None)
         if gid not in groups:
             groups[gid] = []
@@ -1076,6 +1075,9 @@ def merge_flat_chunk_hypotheses(
         if gid is None:
             merged_list.extend(group)
             continue
+
+        # Sort within the group by chunk_start for correct temporal ordering.
+        group = sorted(group, key=lambda h: getattr(h, 'chunk_start', 0))
 
         if len(group) == 1:
             h = group[0]
@@ -1112,26 +1114,31 @@ def merge_flat_chunk_hypotheses(
 
 def _normalize_hypothesis_group_id(hypothesis_id: str) -> str:
     """
-    Normalize hypothesis IDs so that segmented continuations share the same group ID.
+    Normalize hypothesis IDs to the base recording ID so that all 1-hour windows
+    and segmented continuations of the same recording are grouped together.
 
-    IDs ending with `_cut_segmented` represent continuations of the chunk whose ID
-    shares the same prefix but ends with `-0`. Only the substring after the final
-    `-` is replaced so prefixes containing additional dashes remain unchanged.
+    Window IDs produced by ``cut_into_windows`` follow the pattern
+    ``"{recording_id}-{N}"``.  Stripping the trailing ``-N`` recovers the
+    recording ID so that windows 0, 1, 2, … of the same recording are merged by
+    ``merge_all_hypotheses``.
+
+    IDs ending with ``_cut_segmented`` (hybrid-model continuations) are first
+    stripped of the suffix to get the underlying window ID (e.g.
+    ``"11-1_cut_segmented"`` → ``"11-1"``), then normalized the same way.
     """
     if not isinstance(hypothesis_id, str):
         return hypothesis_id
-    if 'cut_segmented' not in hypothesis_id:
-        return hypothesis_id
 
-    base_id = hypothesis_id.split('_cut_segmented', 1)[0]
-    if '-' not in base_id:
-        return base_id
+    if 'cut_segmented' in hypothesis_id:
+        hypothesis_id = hypothesis_id.split('_cut_segmented', 1)[0]
 
-    prefix, _ = base_id.rsplit('-', 1)
-    if not prefix:
-        return base_id
+    # Strip trailing -N (window index) to recover the base recording ID.
+    if '-' in hypothesis_id:
+        prefix, suffix = hypothesis_id.rsplit('-', 1)
+        if suffix.isdigit() and prefix:
+            return prefix
 
-    return f'{prefix}-0'
+    return hypothesis_id
 
 
 def merge_all_hypotheses(hypotheses_list, timestamps, subsampling_factor, chunk_duration_seconds=3600, timestamps_type=None):

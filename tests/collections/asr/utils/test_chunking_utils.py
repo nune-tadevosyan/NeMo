@@ -23,10 +23,22 @@ from nemo.collections.asr.parts.utils.chunking_utils import (
     find_optimal_chunk_size,
     join_char_level_timestamps,
     merge_all_hypotheses,
+    merge_flat_chunk_hypotheses,
     merge_hypotheses_of_same_audio,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.mixins.transcription import resolve_chunking
+
+
+def _make_hyp(text, id_, chunk_start=0.0):
+    """Shared hypothesis factory for merge tests."""
+    h = Hypothesis(score=0.0, y_sequence=torch.tensor([1]), timestamp={"word": [], "segment": []})
+    h.text = text
+    h.id = id_
+    h.chunk_start = chunk_start
+    h._encoded_len = 10
+    h._timestamps_type = None
+    return h
 
 
 def _make_char(char, token_id, start_off, end_off, token=None):
@@ -305,13 +317,7 @@ def test_merge_hypotheses_of_same_audio():
 @pytest.mark.unit
 def test_merge_all_hypotheses():
     # Testing if merging by id works
-    def H(text, id_):
-        h = Hypothesis(score=0.0, y_sequence=torch.tensor([1]), timestamp={"word": [], "segment": []})
-        h.text = text
-        h.id = id_
-        return h
-
-    hyps = [H("a", 1), H("b", 1), H("c", 2), H("d", 2)]
+    hyps = [_make_hyp("a", 1), _make_hyp("b", 1), _make_hyp("c", 2), _make_hyp("d", 2)]
 
     merged_list = merge_all_hypotheses(
         hypotheses_list=hyps,
@@ -327,17 +333,11 @@ def test_merge_all_hypotheses():
 
 @pytest.mark.unit
 def test_merge_all_hypotheses_with_cut_segmented_suffix():
-    def H(text, id_):
-        h = Hypothesis(score=0.0, y_sequence=torch.tensor([1]), timestamp={"word": [], "segment": []})
-        h.text = text
-        h.id = id_
-        return h
-
     hyps = [
-        H("root", "11-0"),
-        H("cont1", "11-1_cut_segmented"),
-        H("cont2", "11-2_cut_segmented"),
-        H("other", "12-0"),
+        _make_hyp("root", "11-0"),
+        _make_hyp("cont1", "11-1_cut_segmented"),
+        _make_hyp("cont2", "11-2_cut_segmented"),
+        _make_hyp("other", "12-0"),
     ]
 
     merged_list = merge_all_hypotheses(
@@ -350,6 +350,65 @@ def test_merge_all_hypotheses_with_cut_segmented_suffix():
     assert len(merged_list) == 2
     texts = sorted(m.text for m in merged_list)
     assert texts == ["other", "root cont1 cont2"]
+
+
+@pytest.mark.unit
+def test_merge_flat_chunk_hypotheses_preserves_manifest_order():
+    """merge_flat_chunk_hypotheses must output results in the order they first appear
+    in the flat hypotheses list (which matches the presorted manifest order), NOT in
+    alphabetical order of the string ID.  transcribe_speech presorts by duration and
+    restore_transcription_order expects results back in that same presorted order."""
+
+    # Simulates presorted order: "258" longest, then "113", then "11".
+    # Alphabetical would be: "11", "113", "258" — the opposite of what we want.
+    flat = [
+        _make_hyp("a1", "258-0", 0.0),
+        _make_hyp("a2", "258-0", 40.0),
+        _make_hyp("b1", "113-0", 0.0),
+        _make_hyp("b2", "113-0", 40.0),
+        _make_hyp("c1", "11-0", 0.0),
+        _make_hyp("c2", "11-0", 40.0),
+    ]
+
+    merged = merge_flat_chunk_hypotheses(
+        hypotheses_list=flat,
+        timestamps=False,
+        tokenizer=None,
+        subsampling_factor=8,
+        window_stride=0.01,
+        vocabulary=[chr(i) for i in range(128)],
+        return_hypotheses=False,
+    )
+
+    # Output order must be 258, 113, 11 — not alphabetical 11, 113, 258.
+    assert len(merged) == 3
+    ids = [getattr(m, 'id', None) for m in merged]
+    assert ids == ["258-0", "113-0", "11-0"], f"Expected presorted order, got {ids}"
+
+
+@pytest.mark.unit
+def test_merge_all_hypotheses_multi_window_recording():
+    """Recordings slightly longer than 3600s produce two windows (e.g. "11-0" and "11-1").
+    Both windows must be grouped into a single hypothesis for the same recording."""
+
+    # File "11" is 3609s → windows "11-0" (3600s) and "11-1" (9s tail)
+    # File "113" is 3539s → single window "113-0"
+    hyps = [
+        _make_hyp("first hour", "11-0"),
+        _make_hyp("tail", "11-1"),
+        _make_hyp("other file", "113-0"),
+    ]
+
+    merged_list = merge_all_hypotheses(
+        hypotheses_list=hyps,
+        timestamps=False,
+        subsampling_factor=8,
+        chunk_duration_seconds=3600,
+    )
+
+    assert len(merged_list) == 2
+    texts = sorted(m.text for m in merged_list)
+    assert texts == ["first hour tail", "other file"]
 
 
 @pytest.mark.unit
