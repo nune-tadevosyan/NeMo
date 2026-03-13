@@ -99,37 +99,9 @@ def get_value_from_transcription_config(trcfg, key, default):
 def resolve_chunking(
     audio: Union[str, List[str], np.ndarray, torch.Tensor, DataLoader],
     enable_chunking: bool,
-    batch_size: int = 1,
 ) -> bool:
-    """
-    Determine whether chunking should be enabled for transcription.
-
-    Chunking is enabled when:
-    - User requested it (enable_chunking=True), AND
-    - Input is not an external DataLoader (chunking is set up inside _setup_transcribe_dataloader)
-
-    With the DynamicCutSampler-based pipeline, any batch_size is supported: chunks from
-    different utterances may be interleaved across batches and are merged post-inference.
-
-    Args:
-        audio: Audio input (file path, list of paths, tensor, array, or DataLoader).
-        enable_chunking: Whether chunking was requested.
-        batch_size: Batch size (accepted for API compatibility; no longer restricts chunking).
-
-    Returns:
-        True if chunking should be enabled, False otherwise.
-    """
-    if not enable_chunking:
-        return False
-
-    if isinstance(audio, DataLoader):
-        return False
-
-    logging.warning(
-        "enable_chunking=True: long audio will be split into many chunks processed in parallel. "
-        "Use the largest batch_size your GPU memory allows to maximise throughput."
-    )
-    return True
+    """Returns True when chunking is requested and audio is not an external DataLoader."""
+    return enable_chunking and not isinstance(audio, DataLoader)
 
 
 class TranscriptionTensorDataset(Dataset):
@@ -442,7 +414,6 @@ class TranscriptionMixin(ABC):
                 resolve_chunking(
                     audio=audio,
                     enable_chunking=transcribe_cfg.enable_chunking,
-                    batch_size=transcribe_cfg.batch_size,
                 )
                 and self._is_chunking_compatible_decoding()
             )
