@@ -32,11 +32,6 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
     Specifically, it performs tokenization, I/O, augmentation, and feature extraction (if any).
     Managing data, sampling, de-duplication across workers/nodes etc. is all handled
     by Lhotse samplers instead.
-    Chunking:
-    If `enable_chunking` is True, each audio sample is split into optimally sized chunks
-    (see `chunk_audio_sample`). This is useful for long audio inputs,
-    allowing the model to process them in manageable segments. Note that when chunking is enabled,
-    the same transcript tokens are replicated for each audio chunk.
     """
 
     @property
@@ -49,12 +44,11 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
         }
 
-    def __init__(self, tokenizer: TokenizerSpec, return_cuts: bool = False, enable_chunking: bool = False):
+    def __init__(self, tokenizer: TokenizerSpec, return_cuts: bool = False):
         super().__init__()
         self.tokenizer = TokenizerWrapper(tokenizer)
         self.load_audio = AudioSamples(fault_tolerant=True)
         self.return_cuts = return_cuts
-        self.enable_chunking = enable_chunking
 
     def __getitem__(self, cuts) -> Tuple[torch.Tensor, ...]:
         audio, audio_lens, cuts = self.load_audio(cuts)

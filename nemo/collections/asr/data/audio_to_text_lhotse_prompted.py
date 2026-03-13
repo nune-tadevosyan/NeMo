@@ -64,11 +64,6 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
     We support cuts with multiple supervision segments -- their tokenized texts will be concatenated before we add the prompt tokens.
     This is useful, for example, in code-switched scenarios where each segment is spoken in a different language.
 
-    Chunking:
-    If `enable_chunking` is True, each audio sample is split into optimally sized chunks
-    (see `chunk_audio_sample`). This is useful for long audio inputs,
-    allowing the model to process them in manageable segments.
-
     NOTE:
     If the environment variable `USE_AIS_GET_BATCH` is set to `true` (case-insensitive),
     then batch audio loading from AIStore will be enabled for this dataset. This will use the
@@ -79,7 +74,6 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
         self,
         tokenizer: TokenizerSpec,
         prompt: PromptFormatter,
-        enable_chunking: bool = False,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -101,7 +95,6 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
 
         self.padding_value = self.tokenizer.pad_id
         self.prompt = prompt
-        self.enable_chunking = enable_chunking
 
     def __getitem__(self, cuts: CutSet) -> PromptedAudioToTextMiniBatch:
         # Load the audio's from AIS and add them to the CutSet
