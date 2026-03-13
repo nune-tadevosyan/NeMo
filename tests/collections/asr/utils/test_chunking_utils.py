@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import pytest
 import torch
 
@@ -416,41 +417,16 @@ def test_merge_all_hypotheses_multi_window_recording():
 
 
 @pytest.mark.unit
-def test_resolve_chunking_single_audio_enables():
-    """Test that resolve_chunking returns True for single audio file."""
-    result = resolve_chunking(audio='single.wav', enable_chunking=True, batch_size=4)
-    assert result is True
+def test_resolve_chunking_enables():
+    assert resolve_chunking(audio='single.wav', enable_chunking=True) is True
+    assert resolve_chunking(audio='single.wav', enable_chunking=False) is False
 
 
 @pytest.mark.unit
-def test_resolve_chunking_single_entry_manifest_enables(tmp_path):
-    """Test that resolve_chunking returns True for manifest with single entry."""
-    manifest_path = tmp_path / 'single_audio.jsonl'
-    manifest_path.write_text(json.dumps({'audio_filepath': 'dummy.wav', 'duration': 1.23}) + '\n')
-
-    result = resolve_chunking(audio=str(manifest_path), enable_chunking=True, batch_size=4)
-    assert result is True
-
-
-@pytest.mark.unit
-def test_resolve_chunking_batch_size_one_enables():
-    """Test that resolve_chunking returns True for multiple inputs with batch_size=1."""
-    result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=1)
-    assert result is True
-
-
-@pytest.mark.unit
-def test_resolve_chunking_multiple_inputs_any_batch_size():
-    """DynamicCutSampler supports any batch_size; chunking is not disabled for batch_size > 1."""
-    result = resolve_chunking(audio=['a.wav', 'b.wav'], enable_chunking=True, batch_size=2)
-    assert result is True
-
-
-@pytest.mark.unit
-def test_resolve_chunking_respects_disabled_flag():
-    """Test that resolve_chunking returns False when enable_chunking=False."""
-    result = resolve_chunking(audio='single.wav', enable_chunking=False, batch_size=1)
-    assert result is False
+def test_resolve_chunking_disabled_for_dataloader():
+    """External DataLoader bypasses chunking setup, so resolve_chunking must return False."""
+    dl = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.zeros(1)))
+    assert resolve_chunking(audio=dl, enable_chunking=True) is False
 
 
 @pytest.mark.unit
