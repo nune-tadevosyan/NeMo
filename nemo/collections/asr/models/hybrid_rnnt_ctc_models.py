@@ -33,7 +33,7 @@ from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_o
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.mixins import AccessMixin
 from nemo.utils import logging, model_utils
-from nemo.collections.asr.parts.utils.chunking_utils import merge_chunked_hypotheses, update_timestamps
+
 
 class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRTranscriptionMixin):
     """Base class for hybrid RNNT/CTC models."""

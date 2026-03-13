@@ -115,8 +115,6 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
                     return_cuts=config.get("do_transcribe", False) or enable_chunking,
                 ),
                 tokenizer=self.tokenizer,
-                
-                
             )
 
         dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(
@@ -197,7 +195,11 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         else:
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             enable_chunking = config.get('enable_chunking', False)
-            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
+            batch_size = (
+                config['batch_size']
+                if enable_chunking
+                else min(config['batch_size'], len(config['paths2audio_files']))
+            )
 
         enable_chunking = config.get('enable_chunking', False)
         dl_config = {

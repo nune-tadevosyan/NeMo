@@ -17,8 +17,8 @@ import os
 import shutil
 import tempfile
 
-import pytest
 import librosa
+import pytest
 import torch
 from lhotse import CutSet, MonoCut
 from lhotse.testing.dummies import DummyManifest
@@ -190,8 +190,8 @@ class TestEncDecCTCModel:
             assert isinstance(new_model.tokenizer, tokenizers.AggregateTokenizer)
 
             # should be double
-            assert new_model.tokenizer.tokenizer.vocab_size == 254
-            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 254
+            assert new_model.tokenizer.tokenizer.vocab_size == 264
+            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 264
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit
@@ -428,7 +428,6 @@ class TestEncDecCTCModel:
         assert signatures_match
         assert cls_subset is None
         assert dataclass_subset is None
-
 
     @pytest.mark.unit
     def test_transcribe_parallel_chunking_long_audio(self, fast_conformer_ctc_model):

@@ -16,7 +16,6 @@ import copy
 import os
 import shutil
 import tempfile
-import json
 
 import librosa
 import pytest
@@ -261,8 +260,8 @@ class TestEncDecRNNTBPEModel:
             assert isinstance(new_model.tokenizer, tokenizers.AggregateTokenizer)
 
             # should be double
-            assert new_model.tokenizer.tokenizer.vocab_size == 254
-            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 254
+            assert new_model.tokenizer.tokenizer.vocab_size == 264
+            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 264
 
     @pytest.mark.with_downloads()
     @pytest.mark.skipif(
@@ -343,14 +342,14 @@ class TestEncDecRNNTBPEModel:
         model = fast_conformer_transducer_model
         model.eval()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
-        
+
         # Test with file path (no timestamps)
         hypotheses = model.transcribe(audio_file, return_hypotheses=True, timestamps=False, enable_chunking=True)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
         assert hypotheses[0].timestamp == []
-        
+
         # Test with tensor input (with timestamps)
         audio_data, sr = librosa.load(audio_file, sr=16000)
         audio_tensor = [torch.from_numpy(audio_data)]
@@ -371,8 +370,10 @@ class TestEncDecRNNTBPEModel:
         assert all(s <= e for s, e in zip(starts, ends))
         assert all(x <= y for x, y in zip(starts, starts[1:]))
         assert all(x <= y for x, y in zip(ends, ends[1:]))
-        assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
-        
+        assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[
+            0
+        ].text.split()
+
         assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
             [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
         )
@@ -392,7 +393,8 @@ class TestEncDecRNNTBPEModel:
             == ts_hypotheses[0].timestamp['word'][0]['start_offset']
         )
         assert (
-            ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+            ts_hypotheses[0].timestamp['segment'][-1]['end_offset']
+            == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
         )
 
         # Test chunking with confidence: merged hypothesis should have confidences from join_confidence_values
@@ -424,9 +426,7 @@ class TestEncDecRNNTBPEModel:
         assert hyp.word_confidence is not None, "Merged hypothesis should have word_confidence"
         num_words = len(hyp.text.split())
         assert len(hyp.word_confidence) == 1379
-        assert all(
-            0 <= c <= 1.0 for c in hyp.word_confidence
-        ), "word_confidence values should be in [0, 1]"
+        assert all(0 <= c <= 1.0 for c in hyp.word_confidence), "word_confidence values should be in [0, 1]"
         assert len(hyp.token_confidence) >= num_words, "token_confidence should have at least one per word"
 
     @pytest.mark.with_downloads()

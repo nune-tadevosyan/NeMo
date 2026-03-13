@@ -44,7 +44,6 @@ from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_outputs
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
-from nemo.collections.asr.parts.utils.chunking_utils import merge_parallel_chunks, merge_all_hypotheses, update_timestamps
 from nemo.collections.common.parts.preprocessing.parsers import make_parser
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.mixins import AccessMixin
@@ -291,7 +290,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             Returns a tuple of 2 items -
             * A list of greedy transcript texts / Hypothesis
             * An optional list of beam search transcript texts / Hypothesis / NBestHypothesis.
-        """    
+        """
         timestamps = timestamps or (override_config.timestamps if override_config is not None else None)
         if timestamps is not None:
             need_change_decoding = False
@@ -301,15 +300,23 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                         with output[0][idx].timestep['word'/'segment'/'char']"
                 )
                 return_hypotheses = True
-                with open_dict(self.cfg.decoding):
-                    self.cfg.decoding.compute_timestamps = True
-                    self.cfg.decoding.preserve_alignments = True
-                    # Adding this check to ensure precise timestamps on chunked files.
+
+                if self.cfg.decoding.get("compute_timestamps", None) is not True:
+                    # compute_timestamps None, False or non-existent -> change to True
+                    need_change_decoding = True
+                    with open_dict(self.cfg.decoding):
+                        self.cfg.decoding.compute_timestamps = True
             else:
                 return_hypotheses = False
-                with open_dict(self.cfg.decoding):
-                    self.cfg.decoding.compute_timestamps = False
-            self.change_decoding_strategy(self.cfg.decoding, verbose=False)
+                if self.cfg.decoding.get("compute_timestamps", None) is not False:
+                    # compute_timestamps None, True or non-existent -> change to False
+                    need_change_decoding = True
+                    with open_dict(self.cfg.decoding):
+                        self.cfg.decoding.compute_timestamps = False
+
+            if need_change_decoding:
+                self.change_decoding_strategy(self.cfg.decoding, verbose=False)
+
         return super().transcribe(
             audio=audio,
             use_lhotse=use_lhotse,
@@ -325,8 +332,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             partial_hypothesis=partial_hypothesis,
             enable_chunking=enable_chunking,
         )
-        
-
 
     def change_vocabulary(self, new_vocabulary: List[str], decoding_cfg: Optional[DictConfig] = None):
         """
@@ -542,7 +547,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             batch_sampler = get_semi_sorted_batch_sampler(self, dataset, config)
             config['batch_size'] = None
             config['drop_last'] = False
-            shuffle = False     
+            shuffle = False
 
         return torch.utils.data.DataLoader(
             dataset=dataset,
@@ -979,7 +984,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             encoded_len,
             return_hypotheses=trcfg.return_hypotheses,
             partial_hypotheses=trcfg.partial_hypothesis,
-            return_token_ids=trcfg.enable_chunking, #If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
+            return_token_ids=trcfg.enable_chunking,  # If chunking is enabled, we need to return the token ids to be used for merging the hypotheses
         )
         # cleanup memory
         del encoded
@@ -1013,7 +1018,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         else:
             return hyp
 
-
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
         """
         Setup function for a temporary data loader which wraps the provided audio file.
@@ -1037,7 +1041,11 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             enable_chunking = config.get('enable_chunking', False)
             # With chunking, chunks vastly outnumber input files; always use the requested batch_size.
-            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
+            batch_size = (
+                config['batch_size']
+                if enable_chunking
+                else min(config['batch_size'], len(config['paths2audio_files']))
+            )
 
         enable_chunking = config.get('enable_chunking', False)
         dl_config = {

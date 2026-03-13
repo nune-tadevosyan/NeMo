@@ -52,14 +52,15 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, cuts) -> Tuple[torch.Tensor, ...]:
         audio, audio_lens, cuts = self.load_audio(cuts)
+
         def _tokens_from_cut(cut):
-            return  torch.cat(
-                        [
-                            torch.as_tensor(s.tokens if hasattr(s, "tokens") else self.tokenizer(s.text or "", s.language))
-                            for s in cut.supervisions
-                        ],
-                        dim=0,
-                    )
+            return torch.cat(
+                [
+                    torch.as_tensor(s.tokens if hasattr(s, "tokens") else self.tokenizer(s.text or "", s.language))
+                    for s in cut.supervisions
+                ],
+                dim=0,
+            )
 
         base_tokens = [_tokens_from_cut(cut) for cut in cuts]
 

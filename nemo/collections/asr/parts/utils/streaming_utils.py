@@ -28,13 +28,13 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
 from nemo.collections.asr.data.audio_to_text_lhotse_prompted import PromptedAudioToTextMiniBatch
+from nemo.collections.asr.inference.utils.enums import MergingStrategy
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.context_biasing.biasing_multi_model import BiasingRequestItemConfig
 from nemo.collections.asr.parts.mixins.streaming import StreamingEncoder
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch
 from nemo.collections.asr.parts.preprocessing.segment import get_samples
 from nemo.collections.asr.parts.utils import rnnt_utils
-from nemo.collections.asr.inference.utils.enums import MergingStrategy
 from nemo.collections.asr.parts.utils.timestamp_utils import get_forced_aligned_timestamps_with_external_model
 from nemo.collections.common.tokenizers.canary_tokenizer import CanaryBPETokenizer
 from nemo.core.classes import IterableDataset
@@ -440,16 +440,12 @@ def lcs_alignment_merge_buffer(
 
     search_size = int(delay * max_steps_per_timestep)
     buffer_slice = buffer[-search_size:]
-    i_rel, j_rel, length = _get_lcs_overlap(
-        buffer_slice, data, MergingStrategy.LCS, filepath=filepath
-    )
+    i_rel, j_rel, length = _get_lcs_overlap(buffer_slice, data, MergingStrategy.LCS, filepath=filepath)
 
     if length < min_lcs_length:
         return buffer + data
 
-    return _apply_lcs_merge(
-        buffer, buffer_slice, data, i_rel, j_rel, length, append_only=not parallel_chunking
-    )
+    return _apply_lcs_merge(buffer, buffer_slice, data, i_rel, j_rel, length, append_only=not parallel_chunking)
 
 
 def inplace_buffer_merge(buffer, data, timesteps, model):

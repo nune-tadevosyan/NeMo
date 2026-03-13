@@ -538,7 +538,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             A list of transcriptions (or raw log probabilities if logprobs is True) in the same order
             as paths2audio_files
         """
-        
+
         if timestamps is not None:
             if self.timestamps_asr_model is None:
                 # TODO: Handle this key gracefully later
@@ -548,7 +548,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                     timestamps = 'no'
                 else:
                     timestamps = str(timestamps)
-                    assert timestamps in ('yes', 'no', 'timestamp', 'notimestamp', '1', '0')
+                    if timestamps not in ('yes', 'no', 'timestamp', 'notimestamp', '1', '0'):
+                        raise ValueError(
+                            f"Unsupported timestamps value '{timestamps}'. "
+                            f"Must be one of: 'yes', 'no', 'timestamp', 'notimestamp', '1', '0'."
+                        )
                 prompt['timestamp'] = timestamps
             else:
                 prompt['timestamp'] = 'no'
@@ -579,10 +583,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
 
-        assert config.get("use_lhotse", False), (
-            "Multi-task model only supports dataloading with Lhotse. "
-            "Please set config.{train,validation,test}_ds.use_lhotse=True"
-        )
+        if not config.get("use_lhotse", False):
+            raise ValueError(
+                "Multi-task model only supports dataloading with Lhotse. "
+                "Please set config.{train,validation,test}_ds.use_lhotse=True"
+            )
         global_rank = config.get("global_rank", self.global_rank)
         world_size = config.get("world_size", self.world_size)
         enable_chunking = config.get("enable_chunking", False)
@@ -915,7 +920,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         audio_files = self._may_be_make_dict_and_fix_paths(audio_files, manifest_filepath, trcfg)
 
         return super()._transcribe_input_manifest_processing(audio_files, temp_dir, trcfg)
- 
+
     def _transcribe_forward(
         self, batch: PromptedAudioToTextMiniBatch | tuple[torch.Tensor, ...], trcfg: MultiTaskTranscriptionConfig
     ) -> dict:
@@ -1016,7 +1021,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         encoded_len = outputs.pop('encoded_lengths')
         enc_states = outputs.pop('encoder_states')
         enc_mask = outputs.pop('encoder_mask')
-        decoder_input_ids = outputs.pop('decoder_input_ids') 
+        decoder_input_ids = outputs.pop('decoder_input_ids')
         batch = outputs.pop('batch')
         del log_probs
         hypotheses = self.decoding.decode_predictions_tensor(
@@ -1043,11 +1048,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 audio = batch[0]
                 audio_lens = batch[1]
                 # Pre-chunked tensor path: batch[2] = sample_idx tensor, batch[3] = starts tensor
-                if (
-                    len(batch) >= 4
-                    and isinstance(batch[2], torch.Tensor)
-                    and isinstance(batch[3], torch.Tensor)
-                ):
+                if len(batch) >= 4 and isinstance(batch[2], torch.Tensor) and isinstance(batch[3], torch.Tensor):
                     chunk_sample_ids = batch[2]
                     chunk_starts_samples = batch[3]
 
@@ -1115,7 +1116,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             enable_chunking = config.get('enable_chunking', False)
-            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
+            batch_size = (
+                config['batch_size']
+                if enable_chunking
+                else min(config['batch_size'], len(config['paths2audio_files']))
+            )
         enable_chunking = config.get('enable_chunking', False)
         dl_config = {
             'manifest_filepath': manifest_filepath,
@@ -1345,7 +1350,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             save_restore_connector.model_config_yaml = "timestamps_asr_model_config.yaml"
             save_restore_connector.model_weights_ckpt = "timestamps_asr_model_weights.ckpt"
             external_timestamps_model = ASRModel.restore_from(
-                model_restore_path, save_restore_connector=save_restore_connector,map_location=map_location
+                model_restore_path, save_restore_connector=save_restore_connector, map_location=map_location
             )
             external_timestamps_model.eval()
 
@@ -1387,21 +1392,21 @@ def parse_multitask_prompt(prompt: dict | None) -> list[dict]:
     #     ],
     # )
     if 'turns' in prompt:
-        assert (
+        if not (
             len(prompt) == 1
             and isinstance(prompt["turns"], list)
             and all(isinstance(t, dict) and "role" in t and "slots" in t for t in prompt["turns"])
-        ), (
-            f"When providing a multi-turn prompt through 'turns', no other keys are allowed "
-            f"and the value under prompt['turns'] must be a list of dicts with roles and slot values "
-            f"(we received {prompt=})"
-        )
+        ):
+            raise ValueError(
+                f"When providing a multi-turn prompt through 'turns', no other keys are allowed "
+                f"and the value under prompt['turns'] must be a list of dicts with roles and slot values "
+                f"(we received {prompt=})"
+            )
         return prompt["turns"]
 
     values_are_dicts = any(isinstance(v, dict) for k, v in prompt.items() if k != "slots")
-    assert not values_are_dicts, (
-        f"We don't support dict values for prompt keys other than 'slots'. " f"We received {prompt=}"
-    )
+    if values_are_dicts:
+        raise ValueError(f"We don't support dict values for prompt keys other than 'slots'. " f"We received {prompt=}")
 
     # Case 2.
     # Single-turn prompting format with explicitly provided role and slot names and values.
@@ -1413,10 +1418,11 @@ def parse_multitask_prompt(prompt: dict | None) -> list[dict]:
     #     slots=dict(source_lang='en', target_lang='de', task='asr', pnc=True, context='translate this text'),
     # )
     if "role" in prompt and "slots" in prompt:
-        assert isinstance(prompt["slots"], dict), (
-            f"When providing a single-turn prompt through 'role', 'slots' must also be provided "
-            f"(we received {prompt=})."
-        )
+        if not isinstance(prompt["slots"], dict):
+            raise ValueError(
+                f"When providing a single-turn prompt through 'role', 'slots' must also be provided "
+                f"as a dict (we received {prompt=})."
+            )
         return [prompt]
 
     # Case 3.

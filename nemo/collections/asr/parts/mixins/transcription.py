@@ -33,7 +33,6 @@ from nemo.collections.asr.parts.utils.chunking_utils import merge_flat_chunk_hyp
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging, logging_mode
-from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses
 
 TranscriptionReturnType = Union[List[str], List[Hypothesis], Tuple[List[str]], Tuple[List[Hypothesis]]]
 GenericTranscriptionType = Union[List[Any], List[List[Any]], Tuple[Any], Tuple[List[Any]], Dict[str, List[Any]]]
@@ -54,7 +53,7 @@ class InternalTranscribeConfig:
     # Scratch space
     temp_dir: Optional[str] = None
     manifest_filepath: Optional[str] = None
-    
+
 
 @dataclass
 class TranscribeConfig:
@@ -155,7 +154,7 @@ class TranscriptionTensorDataset(Dataset):
     def __getitem__(self, index):
         if index >= self.length:
             raise IndexError(f"Index {index} out of range for dataset of size {self.length}")
-        
+
         return self.get_item(index)
 
     def __len__(self):
@@ -282,26 +281,26 @@ class TranscriptionMixin(ABC):
     def _is_chunking_compatible_decoding(self) -> bool:
         """
         Check if the current decoding strategy is compatible with chunking.
-        
+
         Beam search with `return_best_hypothesis=False` returns multiple hypotheses per chunk,
         which is incompatible with the current chunking merge implementation that expects
         a single hypothesis per chunk.
-        
+
         Returns:
             bool: True if decoding is compatible with chunking, False otherwise.
         """
         # Check if the model has a decoding attribute (RNNT/TDT models)
         if not hasattr(self, 'decoding'):
             return True
-        
+
         # Check if decoding has an inner decoder (AbstractRNNTDecoding stores decoder as self.decoding)
         inner_decoder = getattr(self.decoding, 'decoding', None)
         if inner_decoder is None:
             return True
-        
+
         # Check if the inner decoder has return_best_hypothesis attribute (beam decoders have this)
         return_best_hypothesis = getattr(inner_decoder, 'return_best_hypothesis', True)
-        
+
         if not return_best_hypothesis:
             logging.warning(
                 "Chunking is not compatible with beam search when `return_best_hypothesis=False`. "
@@ -310,7 +309,7 @@ class TranscriptionMixin(ABC):
                 "Set `decoding.beam.return_best_hypothesis=True` to enable chunking with beam search."
             )
             return False
-        
+
         return True
 
     @torch.inference_mode()
@@ -542,7 +541,7 @@ class TranscriptionMixin(ABC):
                     # Run forward pass
                     model_outputs = self._transcribe_forward(test_batch, transcribe_cfg)
                     processed_outputs = self._transcribe_output_processing(model_outputs, transcribe_cfg)
-                    
+
                     # clear up memory
                     del test_batch, model_outputs
 
