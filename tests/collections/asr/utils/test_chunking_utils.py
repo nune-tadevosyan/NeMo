@@ -31,7 +31,6 @@ from nemo.collections.asr.parts.utils.chunking_utils import (
     merge_hypotheses_of_same_audio,
 )
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
-from nemo.collections.asr.parts.mixins.transcription import resolve_chunking
 
 
 def _make_hyp(text, id_, chunk_start=0.0):
