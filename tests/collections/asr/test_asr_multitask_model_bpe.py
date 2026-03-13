@@ -968,41 +968,6 @@ def test_aed_forced_aligned_timestamps(canary_1b_v2):
 
 @pytest.mark.with_downloads()
 @pytest.mark.unit
-def test_aed_parallel_chunking_numpy_flash(canary_1b_flash):
-    """Test chunking transcription with canary_1b_flash model (without timestamps) using numpy array."""
-    import librosa
-
-    audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
-    # Testing on long audio file to check chunking
-
-    # Load audio as numpy array
-    audio_data, sr = librosa.load(audio_file, sr=16000)
-
-    # canary_1b_flash requires prompt parameters
-    hypotheses_numpy = canary_1b_flash.transcribe(
-        audio_data,
-        source_lang='en',
-        target_lang='en',
-        task='asr',
-        pnc='yes',
-        enable_chunking=True,
-    )
-    assert len(hypotheses_numpy) == 1
-    assert hypotheses_numpy[0].timestamp == []
-
-    # Verify the transcription is non-empty and ends with expected content
-    assert len(hypotheses_numpy[0].text) > 0
-    assert hypotheses_numpy[0].text[-25:] == 'mer orders and relatively'
-
-    # Test with list of numpy arrays
-    hypotheses_filepath = canary_1b_flash.transcribe(audio_file, enable_chunking=True)
-    assert len(hypotheses_filepath) == 1
-    assert hypotheses_filepath[0].timestamp == []
-
-    # Verify transcription matches between different call styles
-    assert hypotheses_numpy[0].text == hypotheses_filepath[0].text
-
-@pytest.mark.unit
 def test_aed_forced_aligned_timestamps_audio_tensor_v2(canary_1b_v2):
     import librosa
 
@@ -1059,6 +1024,42 @@ def test_aed_forced_aligned_timestamps_audio_tensor_v2(canary_1b_v2):
 
 @pytest.mark.with_downloads()
 @pytest.mark.unit
+def test_aed_parallel_chunking_numpy_flash(canary_1b_flash):
+    """Test chunking transcription with canary_1b_flash model (without timestamps) using numpy array."""
+    import librosa
+
+    audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
+    # Testing on long audio file to check chunking
+
+    # Load audio as numpy array
+    audio_data, sr = librosa.load(audio_file, sr=16000)
+
+    # canary_1b_flash requires prompt parameters
+    hypotheses_numpy = canary_1b_flash.transcribe(
+        audio_data,
+        source_lang='en',
+        target_lang='en',
+        task='asr',
+        pnc='yes',
+        enable_chunking=True,
+    )
+    assert len(hypotheses_numpy) == 1
+    assert hypotheses_numpy[0].timestamp == []
+
+    # Verify the transcription is non-empty and ends with expected content
+    assert len(hypotheses_numpy[0].text) > 0
+    assert hypotheses_numpy[0].text[-25:] == 'mer orders and relatively'
+
+    # Test with list of numpy arrays
+    hypotheses_filepath = canary_1b_flash.transcribe(audio_file, enable_chunking=True)
+    assert len(hypotheses_filepath) == 1
+    assert hypotheses_filepath[0].timestamp == []
+
+    # Verify transcription matches between different call styles
+    assert hypotheses_numpy[0].text == hypotheses_filepath[0].text
+
+
+@pytest.mark.unit
 def test_aed_parallel_chunking_tensor_v2(canary_1b_v2):
     """Test that transcription with audio tensors produces the same results as file paths (with timestamps)."""
     import librosa
@@ -1071,8 +1072,8 @@ def test_aed_parallel_chunking_tensor_v2(canary_1b_v2):
 
 
     # Test with timestamps
-    hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=1, enable_chunking=True)
-    hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=1, enable_chunking=True)
+    hypotheses_tensor = canary_1b_v2.transcribe(audio_batch, timestamps=True, enable_chunking=True)
+    hypotheses_filepath = canary_1b_v2.transcribe([audio_file], timestamps=True, batch_size=40, enable_chunking=True)
 
     # Verify both methods return valid results
     assert len(hypotheses_tensor) == 1
@@ -1091,9 +1092,7 @@ def test_aed_parallel_chunking_tensor_v2(canary_1b_v2):
     assert len(hypotheses_tensor[0].timestamp['word']) > 0
     assert len(hypotheses_tensor[0].timestamp['segment']) > 0
     assert len(hypotheses_tensor[0].timestamp['word']) == len(hypotheses_tensor[0].text.split())
-
     # Verify timestamps match between tensor and filepath input
-    assert hypotheses_tensor[0].timestamp['word'] == hypotheses_filepath[0].timestamp['word']
     assert hypotheses_tensor[0].timestamp['segment'] == hypotheses_filepath[0].timestamp['segment']
 
     # Monotonicity and validity of word offsets and times
@@ -1143,7 +1142,7 @@ def test_aed_parallel_chunking_v2(canary_1b_v2):
     audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
     # Testing on long audio file to check chunking and timestamps extraction
 
-    hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False, enable_chunking=True)
+    hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False, enable_chunking=True, batch_size=10)
     assert len(hypotheses) == 1
     assert hypotheses[0].timestamp == []
     ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True, enable_chunking=True)

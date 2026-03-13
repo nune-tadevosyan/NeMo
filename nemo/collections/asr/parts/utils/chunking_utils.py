@@ -166,9 +166,14 @@ def chunk_waveform(
     chunk_range: Optional[List],
     overlap_sec: float = 1.0,
     sample_rate: int = 16000,
-) -> Tuple[List[torch.Tensor], List[int]]:
+) -> Tuple[List[torch.Tensor], List[int], List[int]]:
     """
-    Split a single waveform into overlapping chunks and record each chunk length.
+    Split a single waveform into overlapping chunks and record each chunk length and start offset.
+
+    Returns:
+        chunks: List of chunk tensors (padded to uniform size).
+        chunk_lens: True (unpadded) length of each chunk in samples.
+        chunk_starts: Start offset of each chunk in the original waveform, in samples.
     """
     total_len = waveform.shape[0]
     if chunk_range is None:
@@ -190,7 +195,7 @@ def chunk_waveform(
         )
 
     if chunk_size >= total_len:
-        return [waveform], [total_len]
+        return [waveform], [total_len], [0]
 
     overlap_size = int(overlap_sec * sample_rate)
     step_size = chunk_size - overlap_size
@@ -200,6 +205,7 @@ def chunk_waveform(
 
     chunks: List[torch.Tensor] = []
     chunk_lens: List[int] = []
+    chunk_starts: List[int] = []
     start = 0
 
     while start + overlap_size < total_len:
@@ -213,9 +219,10 @@ def chunk_waveform(
 
         chunks.append(chunk)
         chunk_lens.append(length)
+        chunk_starts.append(start)
         start += step_size
 
-    return chunks, chunk_lens
+    return chunks, chunk_lens, chunk_starts
 
 
 def chunk_audio_sample(
@@ -240,7 +247,7 @@ def chunk_audio_sample(
         raise ValueError("chunk_audio_samples currently expects batch size 1.")
 
     waveform = audio[0, : audio_lens[0]]
-    sample_chunks, sample_lengths = chunk_waveform(
+    sample_chunks, sample_lengths, _ = chunk_waveform(
         waveform=waveform,
         chunk_range=chunk_range,
         overlap_sec=overlap_sec,

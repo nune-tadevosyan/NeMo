@@ -143,7 +143,7 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
             # Fine overlapping chunking within each 1-hour window (lhotse-side).
-            chunk_range = config.get("chunk_range", [30, 40])
+            chunk_range = config.get("chunk_range", [240, 300])
             config.cut_into_windows_balanced_min_duration = chunk_range[0]
             config.cut_into_windows_balanced_max_duration = chunk_range[1]
             config.cut_into_windows_balanced_overlap = 1.0
@@ -241,8 +241,10 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             batch_size = config['batch_size']
         else:
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
-            batch_size = min(config['batch_size'], len(config['paths2audio_files']))
+            enable_chunking = config.get('enable_chunking', False)
+            batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
 
+        enable_chunking = config.get('enable_chunking', False)
         dl_config = {
             'use_lhotse': config.get('use_lhotse', True),
             'manifest_filepath': manifest_filepath,
@@ -251,9 +253,14 @@ class EncDecHybridRNNTCTCBPEModel(EncDecHybridRNNTCTCModel, ASRBPEMixin):
             'shuffle': False,
             'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
             'pin_memory': True,
+            'use_bucketing': False,
+            'drop_last': False,
+            'pad_min_duration': config.get('pad_min_duration', 1.0),
+            'pad_direction': config.get('pad_direction', 'both'),
             'channel_selector': config.get('channel_selector', None),
             'use_start_end_token': self.cfg.validation_ds.get('use_start_end_token', False),
-            'enable_chunking': config.get('enable_chunking', False),
+            'enable_chunking': enable_chunking,
+            'chunk_range': config.get('chunk_range', [240, 300]),
         }
 
         if config.get("augmentor"):

@@ -316,7 +316,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
             # Fine overlapping chunking within each 1-hour window (lhotse-side).
-            chunk_range = config.get("chunk_range", [30, 40])
+            chunk_range = config.get("chunk_range", [240, 300])
             config.cut_into_windows_balanced_min_duration = chunk_range[0]
             config.cut_into_windows_balanced_max_duration = chunk_range[1]
             config.cut_into_windows_balanced_overlap = 1.0
@@ -717,7 +717,14 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         logits, logits_len, greedy_predictions = self.forward(input_signal=batch[0], input_signal_length=batch[1])
         output = dict(logits=logits, logits_len=logits_len)
         if trcfg.enable_chunking:
-            output['cuts'] = batch[-1]
+            last = batch[-1]
+            if len(batch) >= 4 and isinstance(batch[2], torch.Tensor) and isinstance(last, torch.Tensor):
+                # Pre-chunked tensor path: batch = (audio, lens, sample_ids, chunk_starts)
+                output['chunk_sample_ids'] = batch[2]
+                output['chunk_starts_samples'] = last
+            elif last is not None:
+                # Lhotse path: last element is a CutSet
+                output['cuts'] = last
         del greedy_predictions
         return output
 
@@ -725,6 +732,8 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         logits = outputs.pop('logits')
         logits_len = outputs.pop('logits_len')
         cuts = outputs.pop('cuts', None)
+        chunk_sample_ids = outputs.pop('chunk_sample_ids', None)
+        chunk_starts_samples = outputs.pop('chunk_starts_samples', None)
         if trcfg.timestamps and trcfg.enable_chunking:
             final_timestamps_type = self.cfg.decoding.ctc_timestamp_type
             self.decoding.cfg.ctc_timestamp_type = 'char'
@@ -773,6 +782,11 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                     cut = cuts[j]
                     source_id = (cut.custom or {}).get("source_cut_id", cut.id)
                     chunk_start = (cut.custom or {}).get("source_cut_start", 0)
+                elif chunk_sample_ids is not None:
+                    # Pre-chunked tensor path: use stable sample index and actual chunk offset.
+                    sample_rate = getattr(self, 'sample_rate', None) or self.cfg.get('sample_rate', 16000)
+                    source_id = f'audio_{chunk_sample_ids[j].item()}'
+                    chunk_start = chunk_starts_samples[j].item() / sample_rate
                 else:
                     source_id = f'audio_{uuid.uuid4().int}'
                     chunk_start = 0
@@ -814,6 +828,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             enable_chunking = config.get('enable_chunking', False)
             batch_size = config['batch_size'] if enable_chunking else min(config['batch_size'], len(config['paths2audio_files']))
 
+        enable_chunking = config.get('enable_chunking', False)
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,
@@ -823,8 +838,14 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             'shuffle': False,
             'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
             'pin_memory': True,
+            'use_lhotse': config.get('use_lhotse', True),
+            'use_bucketing': False,
+            'drop_last': False,
+            'pad_min_duration': config.get('pad_min_duration', 1.0),
+            'pad_direction': config.get('pad_direction', 'both'),
             'channel_selector': config.get('channel_selector', None),
-            'enable_chunking': config.get('enable_chunking', False),
+            'enable_chunking': enable_chunking,
+            'chunk_range': config.get('chunk_range', [240, 300]),
         }
         if config.get("augmentor"):
             dl_config['augmentor'] = config.get("augmentor")

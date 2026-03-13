@@ -125,6 +125,10 @@ def resolve_chunking(
     if isinstance(audio, DataLoader):
         return False
 
+    logging.warning(
+        "enable_chunking=True: long audio will be split into many chunks processed in parallel. "
+        "Use the largest batch_size your GPU memory allows to maximise throughput."
+    )
     return True
 
 
@@ -133,9 +137,10 @@ class TranscriptionTensorDataset(Dataset):
     Dataset for transcribing audio tensors.
 
     Chunking:
-    If `enable_chunking` is True, each audio sample is split into optimally sized chunks
-    (see `chunk_audio_sample`). This is useful for long audio inputs,
-    allowing the model to process them in manageable segments.
+    If `enable_chunking` is True, each audio sample is pre-split into optimally sized overlapping
+    chunks at construction time. The dataset then has one entry per chunk and each item is a 4-tuple
+    ``(chunk, chunk_len, sample_idx, chunk_start_samples)`` where the last two scalars carry the
+    provenance metadata needed by the post-inference merge logic.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -155,7 +160,25 @@ class TranscriptionTensorDataset(Dataset):
         else:
             self.augmentor = None
 
-        self.length = len(self.audio_tensors)
+        if self.enable_chunking:
+            # Pre-expand every audio tensor into its chunks so the dataloader can use
+            # any batch size and each item already carries (sample_idx, chunk_start_samples).
+            from nemo.collections.asr.parts.utils.chunking_utils import chunk_waveform
+
+            self._chunks: List[Tuple[torch.Tensor, int, int, int]] = []
+            for sample_idx, tensor in enumerate(self.audio_tensors):
+                tensor = self._load_and_pad(tensor)
+                chunks, lens, starts = chunk_waveform(
+                    waveform=tensor,
+                    chunk_range=self.chunk_range,
+                    overlap_sec=1.0,
+                    sample_rate=self.sample_rate,
+                )
+                for chunk, length, start in zip(chunks, lens, starts):
+                    self._chunks.append((chunk, length, sample_idx, start))
+            self.length = len(self._chunks)
+        else:
+            self.length = len(self.audio_tensors)
 
     def __getitem__(self, index):
         if index >= self.length:
@@ -185,9 +208,8 @@ class TranscriptionTensorDataset(Dataset):
         samples = torch.nn.functional.pad(samples, (pad_left, pad_right), mode='constant', value=0.0)
         return samples
 
-    def get_item(self, index):
-        samples = self.audio_tensors[index]
-
+    def _load_and_pad(self, samples: torch.Tensor) -> torch.Tensor:
+        """Apply augmentation (if any) and minimum-duration padding."""
         if self.augmentor is not None:
             logging.warning(
                 "Audio Augmentations are being applied during inference by moving the tensor onto CPU. "
@@ -203,49 +225,58 @@ class TranscriptionTensorDataset(Dataset):
             samples = self.augmentor.perturb(segment)
             samples = torch.tensor(samples.samples, dtype=original_dtype)
 
-        samples = self._pad_audio(samples)
-        # Calculate seq length
+        return self._pad_audio(samples)
+
+    def get_item(self, index):
+        if self.enable_chunking:
+            chunk, length, sample_idx, start_samples = self._chunks[index]
+            seq_len = torch.tensor(length, dtype=torch.long)
+            # Return (audio, audio_len, sample_idx, chunk_start_samples) so that
+            # _transcribe_output_processing can assign stable IDs and correct offsets.
+            return (
+                chunk,
+                seq_len,
+                torch.tensor(sample_idx, dtype=torch.long),
+                torch.tensor(start_samples, dtype=torch.long),
+            )
+
+        samples = self._load_and_pad(self.audio_tensors[index])
         seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
         # Typically NeMo ASR models expect the mini-batch to be a 4-tuple of (audio, audio_len, text, text_len).
         # For inference, we set text and text_len to None to not disrupt the shape of the tuple.
         return samples, seq_len, None, None
 
 
-def _speech_collate_fn_with_chunking(
-    batch: List[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]],
-    pad_id: int,
-    sample_rate: int = 16000,
-    chunk_range: Optional[List[int]] = [240, 300],
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+def _pre_chunked_tensor_collate_fn(
+    batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Collate function for tensor datasets with chunking support.
-    
-    This function collates audio samples and applies chunking to split long audio
-    into smaller overlapping segments for more efficient processing.
-    
-    Args:
-        batch: List of tuples (audio, audio_len, text, text_len)
-        pad_id: Padding ID for text sequences
-        sample_rate: Audio sample rate in Hz
-        chunk_range: [min_seconds, max_seconds] for chunk size. If None, uses default [240, 300].
-    
+    Collate function for pre-chunked tensor datasets (``TranscriptionTensorDataset`` with
+    ``enable_chunking=True``).
+
+    Each item is ``(chunk, chunk_len, sample_idx, chunk_start_samples)`` — all tensors.
+    The function pads chunks to a uniform length and stacks everything.
+
     Returns:
-        Tuple of (audio, audio_lens, text, text_lens) with chunked audio
+        audio: ``(B, T)`` padded chunk audio.
+        audio_lens: ``(B,)`` true (unpadded) length of each chunk in samples.
+        sample_ids: ``(B,)`` original sample index for each chunk (stable ID for merging).
+        chunk_starts: ``(B,)`` start offset of each chunk within its original audio, in samples.
     """
-    # Import here to avoid circular imports
-    from nemo.collections.asr.data.audio_to_text import _speech_collate_fn
-    from nemo.collections.asr.parts.utils.chunking_utils import chunk_audio_sample
-
-    # First, use the standard collate function
-    audio, audio_lens, text, text_lens = _speech_collate_fn(batch, pad_id=pad_id)
-    audio, audio_lens = chunk_audio_sample(
-        audio=audio,
-        audio_lens=audio_lens,
-        chunk_range=chunk_range,
-        sample_rate=sample_rate,
+    chunks, lens, sample_ids, starts = zip(*batch)
+    max_len = max(c.shape[0] for c in chunks)
+    padded = []
+    for chunk in chunks:
+        pad_len = max_len - chunk.shape[0]
+        if pad_len > 0:
+            chunk = torch.nn.functional.pad(chunk, (0, pad_len))
+        padded.append(chunk)
+    return (
+        torch.stack(padded),
+        torch.stack(lens),
+        torch.stack(sample_ids),
+        torch.stack(starts),
     )
-
-    return audio, audio_lens, text, text_lens
 
 
 class TranscriptionMixin(ABC):
@@ -844,15 +875,13 @@ class TranscriptionMixin(ABC):
             )
             pad_id = 0
 
-        # Choose collate function based on chunking setting
+        # Choose collate function based on chunking setting.
+        # When chunking is enabled, TranscriptionTensorDataset pre-expands each audio into
+        # chunks at construction time, so each dataset item is already one chunk with metadata.
+        # Use the dedicated collate that handles (chunk, len, sample_idx, chunk_start) tuples.
         enable_chunking = config.get('enable_chunking', False)
         if enable_chunking:
-            collate_fn = partial[Tuple[Any, Any, Any | None, Any | None]](
-                _speech_collate_fn_with_chunking,
-                pad_id=pad_id,
-                sample_rate=config['sample_rate'],
-                chunk_range=config.get('chunk_range', [240, 300]),
-            )
+            collate_fn = _pre_chunked_tensor_collate_fn
         else:
             collate_fn = partial(_speech_collate_fn, pad_id=pad_id)
 
@@ -921,6 +950,7 @@ class ASRTranscriptionMixin(TranscriptionMixin):
             'text_field': get_value_from_transcription_config(trcfg, 'text_field', 'text'),
             'lang_field': get_value_from_transcription_config(trcfg, 'lang_field', 'lang'),
             'enable_chunking': get_value_from_transcription_config(trcfg, 'enable_chunking', False),
+            'chunk_range': get_value_from_transcription_config(trcfg, 'chunk_range', [240, 300]),
         }
 
         augmentor = get_value_from_transcription_config(trcfg, 'augmentor', None)

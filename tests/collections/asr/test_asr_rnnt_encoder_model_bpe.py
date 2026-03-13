@@ -345,7 +345,7 @@ class TestEncDecRNNTBPEModel:
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         
         # Test with file path (no timestamps)
-        hypotheses = model.transcribe(audio_file, batch_size=1, return_hypotheses=True, timestamps=False, enable_chunking=True)
+        hypotheses = model.transcribe(audio_file, return_hypotheses=True, timestamps=False, enable_chunking=True)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0
@@ -355,7 +355,7 @@ class TestEncDecRNNTBPEModel:
         audio_data, sr = librosa.load(audio_file, sr=16000)
         audio_tensor = [torch.from_numpy(audio_data)]
 
-        ts_hypotheses = model.transcribe(audio_tensor, batch_size=1, return_hypotheses=True, timestamps=True, enable_chunking=True)
+        ts_hypotheses = model.transcribe(audio_tensor, return_hypotheses=True, timestamps=True, enable_chunking=True)
         assert len(ts_hypotheses) == 1
         assert isinstance(ts_hypotheses[0], Hypothesis)
         assert ts_hypotheses[0].text == hypotheses[0].text

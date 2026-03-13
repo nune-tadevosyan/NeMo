@@ -200,7 +200,12 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         logits = self.ctc_decoder(encoder_output=encoded)
         output = dict(logits=logits, encoded_len=encoded_len)
         if trcfg.enable_chunking:
-            output['cuts'] = batch[-1]
+            last = batch[-1]
+            if len(batch) >= 4 and isinstance(batch[2], torch.Tensor) and isinstance(last, torch.Tensor):
+                output['chunk_sample_ids'] = batch[2]
+                output['chunk_starts_samples'] = last
+            elif last is not None:
+                output['cuts'] = last
         del encoded
         return output
 
@@ -213,6 +218,8 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
         logits = outputs.pop('logits')
         encoded_len = outputs.pop('encoded_len')
         cuts = outputs.pop('cuts', None)
+        chunk_sample_ids = outputs.pop('chunk_sample_ids', None)
+        chunk_starts_samples = outputs.pop('chunk_starts_samples', None)
         if trcfg.timestamps and trcfg.enable_chunking:
             final_timestamps_type = self.ctc_decoding.cfg.ctc_timestamp_type
             self.ctc_decoding.cfg.ctc_timestamp_type = 'char'
@@ -241,40 +248,30 @@ class EncDecHybridRNNTCTCModel(EncDecRNNTModel, ASRBPEMixin, InterCTCMixin, ASRT
                 hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
             )
         if trcfg.enable_chunking:
-            if cuts is not None:
-                source_id = (cuts[0].custom or {}).get("source_cut_id", cuts[0].id)
-                source_start = (cuts[0].custom or {}).get("source_cut_start", 0)
-                cut_id = source_id if source_start == 0 else f"{source_id}_cut_segmented"
-            else:
-                cut_id = f'audio_{uuid.uuid4().int}'
-        # CTC path: use vocabulary when no tokenizer (character-based).
-        vocab = getattr(self.ctc_decoder, 'vocabulary', None) or self.joint.vocabulary
-        if trcfg.enable_chunking and len(hypotheses) > 1:
-            merged_hypotheses = merge_chunked_hypotheses(
-                hypotheses=hypotheses,
-                encoded_len=encoded_len,
-                timestamps=trcfg.timestamps,
-                tokenizer=getattr(self, 'tokenizer', None),
-                subsampling_factor=self.encoder.subsampling_factor,
-                window_stride=self.cfg['preprocessor']['window_stride'],
-                timestamps_type=final_timestamps_type,
-                return_hypotheses=trcfg.return_hypotheses,
-            )
-            # Inject the id of the cut to hypothesis to later be used for separate batches
-            setattr(merged_hypotheses, 'id', cut_id)
-            return [merged_hypotheses]
-
-        elif trcfg.enable_chunking:
-            single_hypothesis = hypotheses[0]
-            if trcfg.timestamps:
-                single_hypothesis = update_timestamps(
-                    single_hypothesis,
-                    tokenizer=getattr(self, 'tokenizer', None),
-                    timestamps_type=final_timestamps_type,
-                    vocabulary=vocab,
-                )
-            setattr(single_hypothesis, 'id', cut_id)
-            return [single_hypothesis]
+            # Restore the timestamp type that was temporarily overridden to 'char'
+            if final_timestamps_type is not None:
+                self.ctc_decoding.cfg.ctc_timestamp_type = final_timestamps_type
+            # Stamp each hypothesis with chunk metadata for post-inference merge.
+            # merge_flat_chunk_hypotheses (called in transcription.py) handles all
+            # LCS merging and update_timestamps — do NOT call update_timestamps here.
+            for j, h in enumerate(hypotheses):
+                if cuts is not None:
+                    cut = cuts[j]
+                    source_id = (cut.custom or {}).get("source_cut_id", cut.id)
+                    chunk_start = (cut.custom or {}).get("source_cut_start", 0)
+                elif chunk_sample_ids is not None:
+                    # Pre-chunked tensor path: use stable sample index and actual chunk offset.
+                    sample_rate = getattr(self, 'sample_rate', None) or self.cfg.get('sample_rate', 16000)
+                    source_id = f'audio_{chunk_sample_ids[j].item()}'
+                    chunk_start = chunk_starts_samples[j].item() / sample_rate
+                else:
+                    source_id = f'audio_{uuid.uuid4().int}'
+                    chunk_start = 0
+                setattr(h, 'id', source_id)
+                setattr(h, 'chunk_start', chunk_start)
+                setattr(h, '_encoded_len', encoded_len[j].item())
+                setattr(h, '_timestamps_type', final_timestamps_type)
+            return hypotheses
         else:
             return hypotheses
 

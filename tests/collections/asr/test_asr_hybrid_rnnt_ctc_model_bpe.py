@@ -368,7 +368,7 @@ class TestEncDecHybridRNNTCTCBPEModel:
         model.eval()
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
         # Test with file path (no timestamps)
-        hypotheses = model.transcribe(audio_file, batch_size=1, timestamps=False,enable_chunking=True)
+        hypotheses = model.transcribe(audio_file, batch_size=5, timestamps=False, enable_chunking=True)
         assert len(hypotheses) == 1
         assert isinstance(hypotheses[0], Hypothesis)
         assert isinstance(hypotheses[0].text, str) and len(hypotheses[0].text) > 0

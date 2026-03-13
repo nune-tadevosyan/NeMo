@@ -744,7 +744,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
 
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
 
         enc_states = encoded.permute(0, 2, 1)
@@ -1035,12 +1034,15 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             decoder_input_ids=decoder_input_ids,
             return_hypotheses=trcfg.return_hypotheses,
         )
+
         del enc_states, enc_mask, decoder_input_ids
 
         # Resolve per-cut metadata (cuts, audio, lang_id) for chunking / timestamps
         cuts = None
         audio = None
         audio_lens = None
+        chunk_sample_ids = None
+        chunk_starts_samples = None
         if trcfg.enable_chunking or trcfg.timestamps:
             if isinstance(batch, PromptedAudioToTextMiniBatch):
                 cuts = batch.cuts
@@ -1049,6 +1051,14 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             else:  # TensorDataset / external DataLoader tuple type batch
                 audio = batch[0]
                 audio_lens = batch[1]
+                # Pre-chunked tensor path: batch[2] = sample_idx tensor, batch[3] = starts tensor
+                if (
+                    len(batch) >= 4
+                    and isinstance(batch[2], torch.Tensor)
+                    and isinstance(batch[3], torch.Tensor)
+                ):
+                    chunk_sample_ids = batch[2]
+                    chunk_starts_samples = batch[3]
 
         if trcfg.timestamps and self.timestamps_asr_model is not None:
             hypotheses = get_forced_aligned_timestamps_with_external_model(
@@ -1076,6 +1086,12 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                         if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) and cut.supervisions
                         else None
                     )
+                elif chunk_sample_ids is not None:
+                    # Pre-chunked tensor path: use stable sample index as ID and actual chunk offset.
+                    sample_rate = getattr(self, 'sample_rate', None) or self.cfg.get('sample_rate', 16000)
+                    source_id = f'audio_{chunk_sample_ids[j].item()}'
+                    chunk_start = chunk_starts_samples[j].item() / sample_rate
+                    lang_id = 'en' if isinstance(self.tokenizer, tokenizers.AggregateTokenizer) else None
                 else:
                     source_id = f'audio_{uuid.uuid4().int}'
                     chunk_start = 0

@@ -15,8 +15,11 @@
 import pytest
 import torch
 
-import json
-
+from nemo.collections.asr.parts.mixins.transcription import (
+    TranscriptionTensorDataset,
+    _pre_chunked_tensor_collate_fn,
+    resolve_chunking,
+)
 from nemo.collections.asr.parts.utils.chunking_utils import (
     chunk_audio_sample,
     chunk_waveform,
@@ -83,7 +86,7 @@ def test_find_optimal_chunk_size_prefers_largest_last_chunk():
 def test_chunk_waveform_produces_overlapping_padded_chunks():
     waveform = torch.arange(100, dtype=torch.float32)
 
-    chunks, chunk_lens = chunk_waveform(
+    chunks, chunk_lens, chunk_starts = chunk_waveform(
         waveform=waveform,
         chunk_range=[3, 3],
         overlap_sec=1.0,
@@ -92,6 +95,7 @@ def test_chunk_waveform_produces_overlapping_padded_chunks():
 
     assert len(chunks) == 5
     assert chunk_lens == [30, 30, 30, 30, 20]
+    assert chunk_starts == [0, 20, 40, 60, 80]
     assert all(chunk.shape[0] == 30 for chunk in chunks)
     assert torch.allclose(chunks[0], waveform[:30])
 
@@ -447,3 +451,60 @@ def test_resolve_chunking_respects_disabled_flag():
     """Test that resolve_chunking returns False when enable_chunking=False."""
     result = resolve_chunking(audio='single.wav', enable_chunking=False, batch_size=1)
     assert result is False
+
+
+@pytest.mark.unit
+def test_transcription_tensor_dataset_pre_chunks():
+    """TranscriptionTensorDataset with enable_chunking pre-expands audio into chunks.
+
+    Each item must carry (chunk, chunk_len, sample_idx, chunk_start_samples) so that
+    _transcribe_output_processing can assign stable IDs and correct offsets for merging.
+    """
+    sample_rate = 100  # 100 Hz for easy arithmetic
+    # Two audio tensors: 500 samples (5 s) and 250 samples (2.5 s).
+    # chunk_range=[2, 2] → 2 s chunks (200 samples), overlap=1 s (100 samples), step=100 samples.
+    # Audio 0 (500 samples): starts at 0, 100, 200, 300, 400 → 5 chunks
+    # Audio 1 (250 samples): starts at 0, 100, 150 ... let's check: step=100,
+    #   overlap=100, chunks while start + 100 < 250: start=0,100; start=200 → 200+100=300 > 250, stop → 3 chunks
+    audio_tensors = [
+        torch.ones(500, dtype=torch.float32),
+        torch.ones(250, dtype=torch.float32) * 2,
+    ]
+    config = {
+        'audio_tensors': audio_tensors,
+        'channel_selector': None,
+        'sample_rate': sample_rate,
+        'enable_chunking': True,
+        'chunk_range': [2, 2],  # 2-second chunks at 100 Hz = 200-sample chunks
+    }
+    ds = TranscriptionTensorDataset(config)
+
+    # Dataset length = total number of chunks across all audio tensors
+    assert ds.length > 0
+
+    # All items for audio 0 must have sample_idx=0; all for audio 1 must have sample_idx=1
+    sample_indices = [ds.get_item(i)[2].item() for i in range(ds.length)]
+    assert 0 in sample_indices
+    assert 1 in sample_indices
+
+    # chunk_start_samples must be non-decreasing within each sample's group
+    starts_by_sample = {}
+    for i in range(ds.length):
+        _, _, sidx, start = ds.get_item(i)
+        sidx = sidx.item()
+        starts_by_sample.setdefault(sidx, []).append(start.item())
+
+    for sidx, starts in starts_by_sample.items():
+        assert starts == sorted(starts), f"chunk starts not sorted for sample {sidx}: {starts}"
+        # First chunk must start at sample 0
+        assert starts[0] == 0
+
+    # _pre_chunked_tensor_collate_fn must pad and stack correctly
+    batch = [ds.get_item(i) for i in range(min(4, ds.length))]
+    audio, lens, sample_ids, chunk_starts = _pre_chunked_tensor_collate_fn(batch)
+    assert audio.ndim == 2
+    assert lens.shape[0] == len(batch)
+    assert sample_ids.shape[0] == len(batch)
+    assert chunk_starts.shape[0] == len(batch)
+    # All chunks padded to same length
+    assert all(audio[i].shape[0] == audio[0].shape[0] for i in range(len(batch)))
