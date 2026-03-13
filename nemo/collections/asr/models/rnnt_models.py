@@ -482,10 +482,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
             config['use_lhotse'] = True
-            # Coarse 1-hour outer windowing so very long files don't OOM.
-            config.cut_into_windows_duration = 3600
-            config.cut_into_windows_hop = 3600
-            # Fine overlapping chunking within each 1-hour window (lhotse-side).
             chunk_range = config.get("chunk_range", [240, 300])
             config.cut_into_windows_balanced_min_duration = chunk_range[0]
             config.cut_into_windows_balanced_max_duration = chunk_range[1]
@@ -508,7 +504,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                         do_normalize=config.get('normalize_transcripts', False),
                     ),
                     return_cuts=config.get("do_transcribe", False) or enable_chunking,
-                    enable_chunking=enable_chunking,
                 ),
             )
 

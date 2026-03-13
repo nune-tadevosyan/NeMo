@@ -590,11 +590,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
         world_size = config.get("world_size", self.world_size)
         enable_chunking = config.get("enable_chunking", False)
         if enable_chunking:
-            # Coarse 1-hour outer windowing so very long files don't OOM.
-            config.cut_into_windows_duration = 3600
-            config.cut_into_windows_hop = 3600
-            # Fine overlapping chunking within each 1-hour window (lhotse-side).
-            # AED models process longer context, so default chunk range is 240-300 s.
             chunk_range = config.get("chunk_range", [30, 40])
             config.cut_into_windows_balanced_min_duration = chunk_range[0]
             config.cut_into_windows_balanced_max_duration = chunk_range[1]
@@ -606,7 +601,6 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             dataset=PromptedAudioToTextLhotseDataset(
                 tokenizer=self.tokenizer,
                 prompt=self.prompt,
-                enable_chunking=enable_chunking, 
             ),
             tokenizer=self.tokenizer,
         )
