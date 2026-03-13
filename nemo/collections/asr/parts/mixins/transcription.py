@@ -29,7 +29,7 @@ from tqdm import tqdm
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment, ChannelSelectorType
 from nemo.collections.asr.parts.utils import manifest_utils
-from nemo.collections.asr.parts.utils.chunking_utils import merge_all_hypotheses, merge_flat_chunk_hypotheses
+from nemo.collections.asr.parts.utils.chunking_utils import merge_flat_chunk_hypotheses
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging, logging_mode
@@ -480,7 +480,6 @@ class TranscriptionMixin(ABC):
             _vocabulary = getattr(getattr(self, 'joint', None), 'vocabulary', None) or getattr(
                 getattr(self, 'decoder', None), 'vocabulary', None
             )
-            # Step 1: merge chunks within each source utterance/window using LCS
             results = merge_flat_chunk_hypotheses(
                 hypotheses_list=results,
                 timestamps=_timestamps,
@@ -489,12 +488,6 @@ class TranscriptionMixin(ABC):
                 window_stride=_window_stride,
                 vocabulary=_vocabulary,
                 return_hypotheses=transcribe_cfg.return_hypotheses,
-            )
-            # Step 2: concatenate 1-hour windows of the same recording
-            results = merge_all_hypotheses(
-                hypotheses_list=results,
-                timestamps=_timestamps,
-                subsampling_factor=_subsampling,
             )
         return results
 
