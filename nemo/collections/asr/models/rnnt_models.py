@@ -954,7 +954,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
     def _transcribe_forward(self, batch: Any, trcfg: TranscribeConfig):
         encoded, encoded_len = self.forward(input_signal=batch[0], input_signal_length=batch[1])
-        output = dict[str, Any](encoded=encoded, encoded_len=encoded_len)
+        output: Dict[str, Any] = dict(encoded=encoded, encoded_len=encoded_len)
         if trcfg.enable_chunking:
             last = batch[-1]
             if len(batch) >= 4 and isinstance(batch[2], torch.Tensor) and isinstance(last, torch.Tensor):
