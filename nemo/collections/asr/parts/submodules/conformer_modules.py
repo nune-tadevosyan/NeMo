@@ -219,7 +219,6 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
         if self.use_mamba_only:
             if inference_params is not None:
                 if self.use_bidirectional:
-                    # Backward-direction requires full sequence context; not supported in streaming/incremental mode.
                     raise NotImplementedError(
                         "Bidirectional Mamba attention does not support `inference_params`. "
                         "Set `use_bidirectional=False` for streaming/incremental inference."
@@ -227,19 +226,45 @@ class ConformerLayer(torch.nn.Module, AttentionAdapterModuleMixin, AccessMixin):
                 left_ctx_len = getattr(inference_params, 'left_context_len', 0)
                 right_ctx_len = getattr(inference_params, 'right_context_len', 0)
                 T = x.shape[1]
-                start = left_ctx_len
-                end = T - right_ctx_len if right_ctx_len > 0 else T
-                if start > 0 or end < T:
-                    x_chunk = self.mamba_attention(x[:, start:end], inference_params=inference_params)
-                    parts = []
-                    if start > 0:
-                        parts.append(x.new_zeros(x.shape[0], start, x.shape[2]))
-                    parts.append(x_chunk)
-                    if end < T:
-                        parts.append(x.new_zeros(x.shape[0], T - end, x.shape[2]))
-                    x = torch.cat(parts, dim=1)
+                chunk_len = T - left_ctx_len - right_ctx_len
+                if chunk_len <= 0 or chunk_len >= T:
+                    # Context lengths don't leave a valid split point (e.g. first
+                    # chunk before the buffer has built up full left context).
+                    # Fall back to a single full-sequence pass.
+                    # Keep inference_params only on the last chunk so the SSM
+                    # state is consumed; earlier chunks run stateless.
+                    is_last = getattr(inference_params, 'is_last_chunk', False)
+                    x = self.mamba_attention(
+                        x, inference_params=inference_params if is_last else None
+                    )
                 else:
-                    x = self.mamba_attention(x, inference_params=inference_params)
+                    # Two-segment forward: process the full [left|chunk|right]
+                    # through Mamba so every frame sees full context, but save
+                    # the SSM/conv state at the boundary of frames that won't
+                    # appear in the next window (= first chunk_len frames).
+
+                    # Segment 1 — the "retiring" prefix that advances the window:
+                    out1 = self.mamba_attention(x[:, :chunk_len], inference_params=inference_params)
+                    # Snapshot the state — this is the cache for the next chunk.
+                    saved_ssm = (
+                        self.mamba_attention.ssm_state.clone()
+                        if self.mamba_attention.ssm_state is not None else None
+                    )
+                    saved_conv = (
+                        self.mamba_attention.conv_state.clone()
+                        if self.mamba_attention.conv_state is not None else None
+                    )
+
+                    # Segment 2 — remaining frames (left-overlap + right ctx):
+                    out2 = self.mamba_attention(x[:, chunk_len:], inference_params=inference_params)
+                    x = torch.cat([out1, out2], dim=1)
+
+                    # Restore state to the intermediate save-point so the next
+                    # chunk starts from the correct position (not from
+                    # end-of-right-context).
+                    self.mamba_attention.ssm_state = saved_ssm
+                    if saved_conv is not None:
+                        self.mamba_attention.conv_state = saved_conv
             else:
                 if self.use_bidirectional:
                     x_fwd = self.mamba_attention_forward(x)                           # [B, T, C]
