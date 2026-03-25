@@ -422,7 +422,7 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
     def output_types(self):
         return OrderedDict({"logprobs": NeuralType(('B', 'T', 'D'), LogprobsType())})
 
-    def __init__(self, feat_in, num_classes, init_mode="xavier_uniform", vocabulary=None, add_blank=True, upscale = False, two_layer=True):
+    def __init__(self, feat_in, num_classes, init_mode="xavier_uniform", vocabulary=None, add_blank=True, upscale=False, two_layer=True):
         super().__init__()
 
         if vocabulary is None and num_classes < 0:
@@ -446,18 +446,34 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
         self.decoder_layers = torch.nn.Sequential(
             torch.nn.Conv1d(self._feat_in, self._num_classes, kernel_size=1, bias=True)
         )
-      
-        self.upscale =upscale
-        self.two_layer =two_layer
+
+        self.upscale = upscale
+        self.two_layer = two_layer
 
         if self.upscale:
-            self.up1 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
-            self.smooth1 = nn.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
-            self.act1 = Swish()
-            if self.two_layer:
-                self.up2 = nn.ConvTranspose1d(feat_in, feat_in, kernel_size=4, stride=2, padding=1)
-                self.smooth2 = nn.Conv1d(feat_in, feat_in, kernel_size=3, padding=1, groups=1)
-                self.act2 = Swish()
+            num_stages = 2 if two_layer else 1
+            # Each stage: ConvTranspose1d(k=2,s=2) -> Conv1d(k=1) -> Swish -> Conv1d(k=1) -> Swish
+            # Per stage: 524,800 + 2 x 262,656 = 1,050,112 params
+            # 2 stages total: ~2.1M params
+            self.up_layers = nn.ModuleList(
+                [nn.ConvTranspose1d(feat_in, feat_in, kernel_size=2, stride=2, padding=0)
+                 for _ in range(num_stages)]
+            )
+            self.smooth_layers = nn.ModuleList(
+                [nn.Sequential(
+                    nn.Conv1d(feat_in, feat_in, kernel_size=1),
+                    Swish(),
+                    nn.Conv1d(feat_in, feat_in, kernel_size=1),
+                    Swish(),
+                ) for _ in range(num_stages)]
+            )
+            # Two linear projections after all upsampling stages, preserving [B, C, T'] shape
+            # Each: 512x512 + 512 = 262,656 params -> total +525,312
+            self.post_up_linear = nn.Sequential(
+                nn.Conv1d(feat_in, feat_in, kernel_size=1),
+                Swish(),
+                nn.Conv1d(feat_in, feat_in, kernel_size=1),
+            )
 
         self.apply(lambda x: init_weights(x, mode=init_mode))
 
@@ -475,14 +491,12 @@ class ConvASRDecoder(NeuralModule, Exportable, adapter_mixins.AdapterModuleMixin
             encoder_output = self.forward_enabled_adapters(encoder_output)
             encoder_output = encoder_output.transpose(1, 2)  # [B, C, T]
 
-        # Upsample time by 4x (two layers of 2x each): [B, feat_in, T] -> [B, feat_in, 4*T]
-
+        # Upsample time (2x or 4x): each stage = ConvTranspose1d -> Conv1d -> Swish -> Conv1d -> Swish
         if self.upscale:
-            x = encoder_output                              # [B, C, T]
-            x = self.act1(self.smooth1(self.up1(x)))       # [B, C, 2T]
-            if self.two_layer:
-                x = self.act2(self.smooth2(self.up2(x)))   # [B, C, 4T]
-            encoder_output = x
+            x = encoder_output
+            for up, smooth in zip(self.up_layers, self.smooth_layers):
+                x = smooth(up(x))
+            encoder_output = self.post_up_linear(x)
 
         if self.temperature != 1.0:
             return torch.nn.functional.log_softmax(
