@@ -82,7 +82,13 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             num_classes=self.decoder.num_classes_with_blank - 1,
             zero_infinity=True,
             reduction=self._cfg.get("ctc_reduction", "mean_batch"),
+            alpha=self._cfg.get("label_prior_alpha", 0.0),
         )
+        # Per-token occurrence counts used to update label priors each epoch.
+        # Kept on CPU to avoid accumulating on GPU memory every training step.
+        # Only allocated when label_prior_alpha > 0 so there is zero overhead otherwise.
+        if self._cfg.get("label_prior_alpha", 0.0) > 0.0:
+            self._prior_counts = torch.zeros(self.decoder.num_classes_with_blank)
 
         if hasattr(self._cfg, 'spec_augment') and self._cfg.spec_augment is not None:
             self.spec_augmentation = EncDecCTCModel.from_config_dict(self._cfg.spec_augment)
@@ -378,6 +384,20 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             pin_memory=config.get('pin_memory', False),
         )
 
+    def on_train_epoch_end(self):
+        """Update label priors from counts accumulated during the epoch (arXiv 2406.02560).
+
+        Counts are all-reduced across all GPUs so every rank uses the same global token
+        frequencies before updating the loss's log_priors buffer.
+        """
+        super().on_train_epoch_end()
+        if hasattr(self, '_prior_counts') and self._prior_counts.sum() > 0:
+            counts = self._prior_counts.to(self.device)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.SUM)
+            self.loss.update_priors(counts)
+            self._prior_counts.zero_()
+
     def setup_training_data(self, train_data_config: Optional[Union[DictConfig, Dict]]):
         """
         Sets up the training data loader via a Dict-like object.
@@ -569,6 +589,16 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
+
+        # Accumulate per-token counts for label prior update at end of epoch.
+        # Character counts come from ground-truth targets; blank count is estimated
+        # as (total encoder frames - total character frames).
+        if hasattr(self, '_prior_counts'):
+            for b in range(transcript.size(0)):
+                for tok in transcript[b, : transcript_len[b]]:
+                    self._prior_counts[tok.long()] += 1
+            blank_frames = encoded_len.sum().item() - transcript_len.sum().item()
+            self._prior_counts[self.loss._blank] += max(0, blank_frames)
 
         # Add auxiliary losses, if registered
         loss_value = self.add_auxiliary_losses(loss_value)

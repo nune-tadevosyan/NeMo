@@ -10,6 +10,7 @@ model:
             "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "'"]
   log_prediction: true # enables logging sample predictions in the output during training
   ctc_reduction: 'mean_batch'
+  label_prior_alpha: 0.0  # Set to 0.3 to enable label prior CTC loss (arXiv 2406.02560). Do not exceed 0.5.
   skip_nan_grad: false
 
   train_ds:

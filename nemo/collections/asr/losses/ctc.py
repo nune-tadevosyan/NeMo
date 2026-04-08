@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import torch
 from torch import nn
 
@@ -42,7 +44,7 @@ class CTCLoss(nn.CTCLoss, Serialization, Typing):
         """
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, num_classes, zero_infinity=False, reduction='mean_batch'):
+    def __init__(self, num_classes, zero_infinity=False, reduction='mean_batch', alpha=0.0):
         self._blank = num_classes
         # Don't forget to properly call base constructor
         if reduction not in ['none', 'mean', 'sum', 'mean_batch', 'mean_volume']:
@@ -56,6 +58,28 @@ class CTCLoss(nn.CTCLoss, Serialization, Typing):
             ctc_reduction = reduction
             self._apply_reduction = False
         super().__init__(blank=self._blank, reduction=ctc_reduction, zero_infinity=zero_infinity)
+
+        # Label prior scaling (arXiv 2406.02560).
+        # When alpha > 0, log_probs are shifted by -alpha * log(P(k)) before the CTC DP,
+        # penalising over-represented tokens (blank ~80%) and boosting rare ones.
+        # alpha = 0 disables the feature entirely (standard CTC behaviour).
+        # Paper recommends alpha = 0.3; values above 0.5 may cause instability.
+        self.alpha = alpha
+        num_tokens = num_classes + 1  # vocabulary + blank
+        # Initialise to uniform: log(1/V) for every token.
+        # Updated at the end of each training epoch via update_priors().
+        self.register_buffer('log_priors', torch.full((num_tokens,), -math.log(num_tokens)))
+
+    def update_priors(self, counts: torch.Tensor):
+        """Recompute log_priors from per-token occurrence counts.
+
+        Args:
+            counts: 1-D tensor of shape [num_classes + 1] containing raw token counts
+                    (including blank at index self._blank), already all-reduced across GPUs.
+        """
+        counts = counts.float()
+        probs = (counts + 1e-8) / (counts.sum() + 1e-8 * counts.numel())
+        self.log_priors.copy_(torch.log(probs))
 
     def reduce(self, losses, target_lengths):
         if self.config_reduction == 'mean_batch':
@@ -72,6 +96,11 @@ class CTCLoss(nn.CTCLoss, Serialization, Typing):
         input_lengths = input_lengths.long()
         target_lengths = target_lengths.long()
         targets = targets.long()
+        if self.alpha != 0.0:
+            # Shift log-probs by -alpha * log(P(k)).  Broadcasts [B, T, D] - [D].
+            # The CTC DP does not require a normalised distribution, so non-normalised
+            # log-scores are valid here (arXiv 2406.02560, Section 2.1).
+            log_probs = log_probs - self.alpha * self.log_priors
         # here we transpose because we expect [B, T, D] while PyTorch assumes [T, B, D]
         log_probs = log_probs.transpose(1, 0)
         loss = super().forward(
