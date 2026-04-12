@@ -756,7 +756,15 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 # cudaMallocHost()-allocated tensor to be floating
                 # around. Were that to be the case, then the pinned
                 # memory cache would always miss.
-                hypotheses[idx].y_sequence = logits_cpu[idx, : logits_len[idx]].clone()
+                logits_to_store = logits_cpu[idx, : logits_len[idx]].clone()
+                # Apply label prior correction for forced alignment (arXiv 2406.02560).
+                # The training loss applies this correction internally; mirror it here so
+                # the y_sequence used by viterbi_decoding reflects the same prior-scaled
+                # scores. No renormalisation needed — Viterbi cares only about relative
+                # per-frame scores, not absolute log-probability values.
+                if self.loss.alpha != 0.0:
+                    logits_to_store = logits_to_store - self.loss.alpha * self.loss.log_priors.cpu()
+                hypotheses[idx].y_sequence = logits_to_store
                 if hypotheses[idx].alignments is None:
                     hypotheses[idx].alignments = hypotheses[idx].y_sequence
             del logits_cpu
