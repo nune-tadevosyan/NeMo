@@ -590,15 +590,14 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
 
-        # Accumulate per-token counts for label prior update at end of epoch.
-        # Character counts come from ground-truth targets; blank count is estimated
-        # as (total encoder frames - total character frames).
+        # Accumulate soft token counts by marginalising the model's posteriorgram over time,
+        # matching the method in arXiv 2406.02560.  Padding frames are excluded via the mask.
         if hasattr(self, '_prior_counts'):
-            for b in range(transcript.size(0)):
-                for tok in transcript[b, : transcript_len[b]]:
-                    self._prior_counts[tok.long()] += 1
-            blank_frames = encoded_len.sum().item() - transcript_len.sum().item()
-            self._prior_counts[self.loss._blank] += max(0, blank_frames)
+            probs = log_probs.detach().exp()  # [B, T, V+1]
+            mask = (
+                torch.arange(probs.size(1), device=probs.device).unsqueeze(0) < encoded_len.unsqueeze(1)
+            ).unsqueeze(-1)  # [B, T, 1]
+            self._prior_counts += (probs * mask).sum(dim=(0, 1)).float().cpu()
 
         # Add auxiliary losses, if registered
         loss_value = self.add_auxiliary_losses(loss_value)

@@ -16,6 +16,7 @@
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from nemo.core.classes import Serialization, Typing, typecheck
@@ -63,7 +64,7 @@ class CTCLoss(nn.CTCLoss, Serialization, Typing):
         # When alpha > 0, log_probs are shifted by -alpha * log(P(k)) before the CTC DP,
         # penalising over-represented tokens (blank ~80%) and boosting rare ones.
         # alpha = 0 disables the feature entirely (standard CTC behaviour).
-        # Paper recommends alpha = 0.3; values above 0.5 may cause instability.
+        # Paper recommends alpha = 0.3; paper reports alpha > 0.3 causes convergence failure.
         self.alpha = alpha
         num_tokens = num_classes + 1  # vocabulary + blank
         # Initialise to uniform: log(1/V) for every token.
@@ -98,9 +99,10 @@ class CTCLoss(nn.CTCLoss, Serialization, Typing):
         targets = targets.long()
         if self.alpha != 0.0:
             # Shift log-probs by -alpha * log(P(k)).  Broadcasts [B, T, D] - [D].
-            # The CTC DP does not require a normalised distribution, so non-normalised
-            # log-scores are valid here (arXiv 2406.02560, Section 2.1).
-            log_probs = log_probs - self.alpha * self.log_priors
+            # Re-normalise with log_softmax so the result is a valid log-prob distribution
+            # compatible with PyTorch's CTCLoss (the paper used k2 to avoid this requirement;
+            # see arXiv 2406.02560, Section 3.3).
+            log_probs = F.log_softmax(log_probs - self.alpha * self.log_priors, dim=-1)
         # here we transpose because we expect [B, T, D] while PyTorch assumes [T, B, D]
         log_probs = log_probs.transpose(1, 0)
         loss = super().forward(
