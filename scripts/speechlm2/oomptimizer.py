@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import importlib
 import math
 import os
@@ -203,10 +204,14 @@ class ProfilingBatchGenerator:
             # Training step failed with OOM.
             # Update the minimum known batch size that causes an error.
             self._min_err = min(float("inf") if self._min_err is None else self._min_err, self._current)
+            if self._current <= 1 and self._max_ok is None:
+                raise RuntimeError(
+                    "OOM even with batch_size=1. The model does not fit on this GPU for the current sequence length."
+                )
             # Training step failed on OOM
             if self._max_ok is None:
                 # We haven't found a batch size that works yet, keep going 2x down.
-                self._current = round(self._current / 2)
+                self._current = max(1, round(self._current / 2))
             else:
                 # Try the middle-point between the known extremes.
                 self._current = round((self._max_ok + self._min_err) / 2)
@@ -502,7 +507,7 @@ def oomptimizer(
                     click.secho(f"OOM!", fg="yellow")
                     oom = True
                 except RuntimeError as e:
-                    if "cuFFT error: CUFFT_INTERNAL_ERROR" not in str(e):
+                    if "cuFFT error:" not in str(e):
                         raise
                     click.secho(f"OOM!", fg="yellow")
                     oom = True
@@ -513,11 +518,9 @@ def oomptimizer(
                         f"\t[END step] [CUDA RAM CURRENT: {torch.cuda.memory_allocated() / (1024 * 1024):.1f}MB] [CUDA RAM MAX: {torch.cuda.max_memory_allocated() / (1024*1024):.1f}MB]"
                     )
                     del batch
-                    # Note: We could call empty_cache() to free up some more memory on the GPU,
-                    #       but we have found out empirically that this causes a mismatched condition
-                    #       between OOMptimizer and the actual training. During training, there is some
-                    #       degree of memory fragmentation and it's better to simulate that in OOMptimizer.
-                    # torch.cuda.memory.empty_cache()
+                    if oom:
+                        gc.collect()
+                        torch.cuda.empty_cache()
                     torch.cuda.reset_max_memory_allocated()
                 return oom
 
