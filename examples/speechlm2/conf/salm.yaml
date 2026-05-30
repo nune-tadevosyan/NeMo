@@ -17,6 +17,12 @@ model:
 
   prompt_format: qwen
   audio_locator_tag: "<|audioplaceholder|>"  # placeholder token for audio turn is expected
+  # Standalone space token inserted between words during retokenization (must exist in tokenizer vocab).
+  space_token_tag: "_"
+  # Retokenize assistant targets during training to insert explicit space tokens between words.
+  retokenize_with_separate_space: true
+  # Print tokenized text once on rank 0 at the first training step (for verifying retokenization).
+  debug_print_tokenized_text: false
 
   # Note: Uncomment the block below to enable LoRA on LLM via HuggingFace PEFT library.
   #   It will automatically freeze LLM parameters even if freeze_params was unused,

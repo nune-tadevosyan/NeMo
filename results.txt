@@ -1,0 +1,4 @@
+Dataset        BLEU    COMET
+-----------  ------  -------
+generations    9.92    60.94
+AVERAGE        9.92    60.94

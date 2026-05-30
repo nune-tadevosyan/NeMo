@@ -11,19 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from re import I
 import warnings
 from collections import defaultdict
-from itertools import repeat
+from typing import Any
 from pathlib import Path
-from typing import Any, List, Optional
+import random
 
 import torch
-from lhotse import CutSet
 from lightning import LightningModule
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from peft import PeftModel
 from torch import Tensor
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard, register_fsdp_forward_method
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -34,23 +34,39 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 from transformers import GenerationConfig
+from typing import List, Optional
+from nemo.collections.asr.models import ASRModel
+from nemo.collections.common.prompts import PromptFormatter
+from nemo.collections.common.tokenizers import AutoTokenizer
+from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
+from nemo.collections.speechlm2.models.salm import _resolve_audios_in_prompt, replace_placeholders_and_build_targets
+from nemo.collections.speechlm2.modules import AudioPerceptionModule
+from nemo.collections.speechlm2.modules.perception import AudioTranscriptionPerceptionModule
+from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
+from nemo.collections.speechlm2.parts.lora import maybe_install_lora
+from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
+from nemo.collections.speechlm2.parts.pretrained import (
+    load_pretrained_hf,
+    load_pretrained_nemo,
+    move_embedding,
+    setup_speech_encoder,
+)
+from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, MaskType, NeuralType
+from nemo.utils import logging
+from nemo.collections.common.data.lhotse.text_adapters import TextTurn
+from nemo.collections.common.data.lhotse import NeMoMultimodalConversation
+from nemo.collections.common.data.lhotse.dataloader import tokenize_with_prompt
+from lhotse import fastcopy
+from lhotse.serialization import SequentialJsonlWriter
 
 from nemo.collections.asr.parts.utils.aligner_utils import (
     create_encoded_char_offsets_from_timestamps,
     create_timestamps_from_dtw_path,
     dtw_alignment,
 )
-from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets, get_segment_offsets
-from nemo.collections.common.prompts import PromptFormatter
-from nemo.collections.common.tokenizers import AutoTokenizer
-from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
-from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
-from nemo.collections.speechlm2.parts.lora import maybe_install_lora
-from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
-from nemo.collections.speechlm2.parts.pretrained import load_pretrained_hf, move_embedding, setup_speech_encoder
-from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, MaskType, NeuralType
-from nemo.utils import logging
+from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets
 
+from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
 class PreSoftmaxCaptureHook:
     """
     A helper class to capture attention scores BEFORE softmax is applied.
@@ -208,7 +224,9 @@ class PreSoftmaxCaptureHook:
         """Context manager support - automatically removes hooks."""
         self.remove_hooks()
 
-class SALM(LightningModule, HFHubMixin):
+
+
+class SALMWithAsrDecoder(LightningModule, HFHubMixin):
     def __init__(self, cfg) -> None:
         assert isinstance(cfg, dict), (
             "You must pass the config to SALM as a Python dict to support hyperparameter serialization "
@@ -218,38 +236,34 @@ class SALM(LightningModule, HFHubMixin):
         self.save_hyperparameters()
         self.cfg = DictConfig(cfg)
         self.audio_locator_tag = self.cfg.audio_locator_tag
-        self.space_token_tag = self.cfg.get("space_token_tag", "_")
-        self.retokenize_with_separate_space_training = self.cfg.get("retokenize_with_separate_space", False)
-
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
-        special_tokens = [self.audio_locator_tag]
-        if self.space_token_tag and self.space_token_tag not in self.tokenizer.tokenizer.get_vocab():
-            special_tokens.append(self.space_token_tag)
-        self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+        self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
         self.llm = load_pretrained_hf(self.cfg.pretrained_llm, pretrained_weights=self.cfg.pretrained_weights)
+        if not hasattr(self.llm, "model") and hasattr(self.llm, "backbone"):
+            type(self.llm).model = property(lambda self: self.backbone)
+        if not hasattr(self.llm.model, "embed_tokens") and hasattr(self.llm.model, "embeddings"):
+            self.llm.model.embed_tokens = self.llm.model.embeddings
         # Note: we have to "move out" the token embedding outside of LLM to avoid
         #       messing up FSDP/TP hooks.
         self.embed_tokens = self.llm.model.embed_tokens
         del self.llm.model.embed_tokens
-        if self.tokenizer.vocab_size > self.embed_tokens.num_embeddings:
-            self.embed_tokens = self._resize_token_embeddings(self.tokenizer.vocab_size)
 
         # Load the pretrained streaming ASR model and copy its parameters into the audio perception module.
-        setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
+        setup_speech_encoder_with_asr(self, pretrained_weights=self.cfg.pretrained_weights)
+        assert isinstance(self.perception, AudioTranscriptionPerceptionModule)
 
         # Load pretrained weights if provided
-        if (init_from_path := self.cfg.get("init_from_path", None)) is not None:
+        if (init_from_path := self.cfg.get("init_from_path", None)) is not  None:
+            init_from_path = "//home/ntadevosyan/models/archive/nemotron_omni/valid_+llama8b-multilayer-asr/"
             init_from_path = Path(init_from_path)
             assert init_from_path.is_dir(), "init_from_path must be a directory containing HF checkpoint"
             logging.warning(f"Loading pretrained weights from {str(init_from_path)}")
             from safetensors import safe_open
-
             tensors = {}
             with safe_open(init_from_path / "model.safetensors", framework="pt") as f:
                 for k in f.keys():
                     tensors[k] = f.get_tensor(k)
-            filtered_tensors = self._filter_checkpoint_for_vocab_expansion(tensors)
-            missing_keys, unexpected_keys = self.load_state_dict(filtered_tensors, strict=False)
+            missing_keys, unexpected_keys = self.load_state_dict(tensors, strict=False)
             logging.warning(f"Missing keys: {missing_keys}")
             logging.warning(f"Unexpected keys: {unexpected_keys}")
 
@@ -285,7 +299,7 @@ class SALM(LightningModule, HFHubMixin):
                     "Falling back to 'Ġ'. Override space_prefix_char / space_token_id if this is wrong."
                 )
                 space_prefix_char = 'Ġ'
-
+        import pdb; pdb.set_trace()
         space_tokens = self.tokenizer.text_to_tokens(" ")
         if space_tokens:
             space_token_id = self.tokenizer.tokens_to_ids(space_tokens)[0]
@@ -342,52 +356,6 @@ class SALM(LightningModule, HFHubMixin):
         return self.tokenizer.token_to_id(self.audio_locator_tag)
 
     @property
-    def space_token_tag_id(self) -> int | None:
-        if self.space_token_tag is None:
-            return None
-        return self.tokenizer.token_to_id(self.space_token_tag)
-
-    def _resize_token_embeddings(self, new_num_tokens: int) -> torch.nn.Embedding:
-        old_embeddings = self.embed_tokens
-        new_embeddings = torch.nn.Embedding(
-            new_num_tokens,
-            old_embeddings.embedding_dim,
-            dtype=old_embeddings.weight.dtype,
-            device=old_embeddings.weight.device,
-        )
-        num_to_copy = min(old_embeddings.num_embeddings, new_num_tokens)
-        new_embeddings.weight.data[:num_to_copy] = old_embeddings.weight.data[:num_to_copy]
-        return new_embeddings
-
-    def _filter_checkpoint_for_vocab_expansion(self, checkpoint: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Load checkpoint weights, partially copying vocab-sized tensors when tokenizer was expanded."""
-        model_state = self.state_dict()
-        filtered: dict[str, torch.Tensor] = {}
-        for key, value in checkpoint.items():
-            if key not in model_state:
-                continue
-            target = model_state[key]
-            if target.shape == value.shape:
-                filtered[key] = value
-            elif (
-                target.ndim >= 1
-                and value.ndim >= 1
-                and target.shape[1:] == value.shape[1:]
-                and target.shape[0] != value.shape[0]
-            ):
-                merged = target.clone()
-                num_rows = min(target.shape[0], value.shape[0])
-                merged[:num_rows] = value[:num_rows]
-                filtered[key] = merged
-                logging.info(
-                    f"Partially loaded {key}: copied {num_rows}/{target.shape[0]} vocab rows "
-                    f"(checkpoint={value.shape[0]}, model={target.shape[0]})"
-                )
-            else:
-                logging.info(f"Skipping {key}: shape mismatch {tuple(value.shape)} vs {tuple(target.shape)}")
-        return filtered
-
-    @property
     def token_equivalent_duration(self) -> float:
         """
         Returns the audio duration corresponding to a single frame/token at the output of ``self.perception``.
@@ -435,22 +403,30 @@ class SALM(LightningModule, HFHubMixin):
         * Take care of any necessary slicing to align the shapes of source audio,
             target audio, and target token ids.
         """
-        if self.retokenize_with_separate_space_training:
-            batch = self._retokenize_training_batch(batch)
-        if self.cfg.get("debug_print_tokenized_text", False) and not getattr(
-            self, "_debug_printed_tokens", False
-        ) and self.global_rank == 0:
-            self._debug_printed_tokens = True
-            for i, (ids, mask) in enumerate(zip(batch["input_ids"], batch["loss_mask"])):
-                valid = ids[ids != self.text_pad_id]
-                ans = valid[mask[ids != self.text_pad_id]]
-                print(f"[sample {i}] full: {self.tokenizer.ids_to_text(valid.tolist())}")
-                print(f"[sample {i}] target: {self.tokenizer.ids_to_text(ans.tolist())}")
-                print(f"[sample {i}] target tokens: {self.tokenizer.ids_to_tokens(ans.tolist())}")
-                print(f"[sample {i}] target ids: {ans.tolist()}")
         # Source audio encoding.
         # Input audio: (B, T_samples)
         # Audio embeddings: (B, T, H)
+        # encoded, encoded_len = self.perception.forward_encoder(
+        #     input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
+        # )
+        # asr_hyps = self.perception.transcribe_encoded(encoded=encoded, encoded_len=encoded_len)
+        # # During training, we randomly drop the transcript
+        # for hyp in asr_hyps:
+        #     if self.training and random.random() < self.cfg.get("asr_transcript_drop_prob", 0.0):
+        #         hyp.text = ""
+        # asr_tokens = [
+        #     torch.as_tensor(self.tokenizer.text_to_ids(f">> {hyp.text} <<" if hyp.text else ">> <<"))
+        #     for hyp in asr_hyps
+        # ]
+        # asr_tokens_len = [at.shape[0] for at in asr_tokens]
+        # asr_tokens = torch.cat(asr_tokens, dim=0).unsqueeze(0).to(self.device)
+        # transcript_embs = torch.split(self.embed_tokens(asr_tokens).squeeze(0), asr_tokens_len, dim=0)
+        # audio_embs, audio_emb_lens = self.perception(encoded=encoded, encoded_len=encoded_len)
+        # audio_embs = [
+        #     torch.cat([aemb[:aemblen], temb], dim=0)
+        #     for aemb, aemblen, temb in zip(audio_embs, audio_emb_lens, transcript_embs)
+        # ]
+
         audio_embs, audio_emb_lens = self.perception(
             input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
         )
@@ -526,6 +502,9 @@ class SALM(LightningModule, HFHubMixin):
         self._partial_val_losses = defaultdict(list)
         self._partial_accuracies = defaultdict(list)
 
+        # collect generations per validation set (per-rank)
+        self._val_generations = defaultdict(list)
+
     def on_validation_epoch_end(self) -> None:
         val_losses = []
         for name, vals in self._partial_val_losses.items():
@@ -544,32 +523,93 @@ class SALM(LightningModule, HFHubMixin):
         self._partial_val_losses.clear()
         self._partial_accuracies.clear()
 
+        # Gather and write generations to a single file per dataset (rank 0 only)
+        if self.cfg.get("val_save_path", None) is not None:
+            dist = torch.distributed
+            if dist.is_available() and dist.is_initialized():
+                world_size = dist.get_world_size()
+                gathered = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered, dict(self._val_generations))
+                is_global_zero = dist.get_rank() == 0
+            else:
+                gathered = [dict(self._val_generations)]
+                is_global_zero = True
+
+            if is_global_zero:
+                merged = defaultdict(list)
+                for per_rank_dict in gathered:
+                    for name, items in per_rank_dict.items():
+                        merged[name].extend(items)
+
+                val_save_path = Path(self.cfg.val_save_path) / f"{self.global_step:06d}"
+                val_save_path.mkdir(parents=True, exist_ok=True)
+                for name, items in merged.items():
+                    out_path = val_save_path / f"{name}.jsonl"
+                    with SequentialJsonlWriter(out_path) as writer:
+                        for obj in items:
+                            writer.write(obj)
+
+        self._val_generations.clear()
+
     def validation_step(self, batch: dict, batch_idx: int):
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
                 continue  # some dataset is exhausted
-            inputs = self.prepare_inputs(dataset_batch)
-            forward_outputs = self(inputs["input_embeds"], attention_mask=inputs["attention_mask"])
-            num_frames = (inputs["target_ids"] != -100).long().sum()
-            with loss_parallel():
-                loss = (
-                    torch.nn.functional.cross_entropy(
-                        forward_outputs["logits"].flatten(0, 1),
-                        inputs["target_ids"].flatten(0, 1),
-                        reduction="sum",
-                        ignore_index=-100,
+            
+            try:
+                inputs = self.prepare_inputs(dataset_batch)
+                forward_outputs = self(inputs["input_embeds"], attention_mask=inputs["attention_mask"])
+                num_frames = (inputs["target_ids"] != -100).long().sum()
+                with loss_parallel():
+                    loss = (
+                        torch.nn.functional.cross_entropy(
+                            forward_outputs["logits"].flatten(0, 1),
+                            inputs["target_ids"].flatten(0, 1),
+                            reduction="sum",
+                            ignore_index=-100,
+                        )
+                        / num_frames
                     )
-                    / num_frames
+
+                preds = forward_outputs["logits"].argmax(dim=-1).view(-1)
+                refs = inputs["target_ids"].reshape(-1)
+                preds = preds[refs != -100]
+                refs = refs[refs != -100]
+                accuracy = preds.eq(refs).float().mean()
+
+                self._partial_accuracies[name].append(accuracy)
+                self._partial_val_losses[name].append(loss)
+
+            except Exception as e:
+                # Skip the dataset if there is an error, e.g., the dataset does not have answers
+                logging.warning_once(f"Error in validation step for dataset {name}: {e}")
+
+            # Run autoregressive generation and collect results (writing happens at epoch end)
+            if self.cfg.get("val_save_path", None) is not None:
+                convs_no_answer = [strip_response_if_any(conv) for conv in dataset_batch["conversations"]]
+                convs_no_answer = [tokenize_with_prompt(conv, self.tokenizer, self.cfg.prompt_format) for conv in convs_no_answer]
+                answer_ids = self.generate(
+                    prompts=left_collate_vectors([c.input_ids for c in convs_no_answer], padding_value=self.text_pad_id).to(self.device),
+                    audios=dataset_batch["audios"].to(self.device, non_blocking=True),
+                    audio_lens=dataset_batch["audio_lens"].to(self.device, non_blocking=True),
+                    generation_config=GenerationConfig(
+                        max_new_tokens=128,
+                        bos_token_id=self.text_bos_id,
+                        eos_token_id=[self.text_eos_id],
+                        pad_token_id=self.text_pad_id,
+                        do_sample=False,
+                        num_beams=1,  # greedy decoding
+                    ),
                 )
-
-            preds = forward_outputs["logits"].argmax(dim=-1).view(-1)
-            refs = inputs["target_ids"].reshape(-1)
-            preds = preds[refs != -100]
-            refs = refs[refs != -100]
-            accuracy = preds.eq(refs).float().mean()
-
-            self._partial_accuracies[name].append(accuracy)
-            self._partial_val_losses[name].append(loss)
+                answer_ids = answer_ids.cpu()
+                answer_ids = [parse_hyp(ans, [self.text_eos_id]) for ans in answer_ids]
+                batch_answers = [self.tokenizer.ids_to_text(ans) for ans in answer_ids]
+                for conv, ans in zip(convs_no_answer, batch_answers):
+                    conv.turns.append(TextTurn(role="assistant", value=ans))
+                    for k, v in list(conv.custom.items()):
+                        if isinstance(v, torch.Tensor):
+                            del conv.custom[k]
+                    self._val_generations[name].append(conv.to_dict())
 
     def on_test_epoch_start(self) -> None:
         return self.on_validation_epoch_start()
@@ -583,6 +623,82 @@ class SALM(LightningModule, HFHubMixin):
     def backward(self, *args, **kwargs):
         with loss_parallel():
             super().backward(*args, **kwargs)
+    
+    def decode_tokens_to_str(self, tokens: List[str], lang: Optional[str] = None) -> str:
+        # if lang is not None:
+        #     hypothesis = self.tokenizer.tokens_to_text(tokens, lang)
+        # else:
+        hypothesis = self.tokenizer.tokens_to_text(tokens)
+        return hypothesis
+    
+    def filter_attention_sink_heads_preserve_layers(
+        self,
+        attention_matrices: torch.Tensor,
+        num_edge_frames: int = 2,
+        sigma_threshold: float = 2.0
+    ) -> tuple[torch.Tensor, list]:
+        """Corrects outlier edge frames by replacing them with average of middle frames."""
+        L, H, T, F = attention_matrices.shape
+        
+        # Work on a copy to avoid modifying the original
+        corrected_attention = attention_matrices.clone()
+        
+        corrected_heads_info = []
+        
+        # Process each head individually
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                head_attention = corrected_attention[layer_idx, head_idx]  # [T, F]
+                
+                # Compute norm for each frame (column)
+                frame_norms = torch.norm(head_attention, p=2, dim=0)  # [F]
+                
+                # Split into edge and middle frames
+                first_edge_norms = frame_norms[:num_edge_frames]  # First 2 frames
+                last_edge_norms = frame_norms[-num_edge_frames:]   # Last 2 frames
+                middle_norms = frame_norms[num_edge_frames:-num_edge_frames]  # All middle frames
+                
+                # Compute statistics from middle frames only
+                if len(middle_norms) > 0:
+                    mean_norm = middle_norms.mean()
+                    std_norm = middle_norms.std()
+                    
+                    lower_bound = mean_norm - sigma_threshold * std_norm
+                    upper_bound = mean_norm + sigma_threshold * std_norm
+                    
+                    # Compute average of middle frames
+                    middle_frames = head_attention[:, num_edge_frames:-num_edge_frames]  # [T, middle_F]
+                    avg_middle_frame = middle_frames.mean(dim=1, keepdim=True)  # [T, 1]
+                    
+                    outlier_frames = []
+                    
+                    # Check and replace first edge frames if outliers
+                    for i in range(num_edge_frames):
+                        if (first_edge_norms[i] < lower_bound) or (first_edge_norms[i] > upper_bound):
+                            head_attention[:, i] = avg_middle_frame.squeeze()
+                            outlier_frames.append(f"first_{i}")
+                    
+                    # Check and replace last edge frames if outliers
+                    for i in range(num_edge_frames):
+                        frame_idx = -num_edge_frames + i
+                        if (last_edge_norms[i] < lower_bound) or (last_edge_norms[i] > upper_bound):
+                            head_attention[:, frame_idx] = avg_middle_frame.squeeze()
+                            outlier_frames.append(f"last_{i}")
+                    
+                    if outlier_frames:
+                        corrected_heads_info.append({
+                            'layer': layer_idx,
+                            'head': head_idx,
+                            'corrected_frames': outlier_frames
+                        })
+        
+        logging.info(f"Corrected {len(corrected_heads_info)} heads with outlier edge frames")
+        for info in corrected_heads_info[:10]:  # Log first 10 for brevity
+            logging.info(f"  Layer {info['layer']}, Head {info['head']}: {info['corrected_frames']}")
+        
+        return corrected_attention, corrected_heads_info
+
+
 
     @torch.no_grad()
     def generate(
@@ -591,7 +707,6 @@ class SALM(LightningModule, HFHubMixin):
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
         generation_config: GenerationConfig = None,
-        timestamps: bool = False,
         **generation_kwargs,
     ) -> torch.Tensor:
         """
@@ -676,6 +791,7 @@ class SALM(LightningModule, HFHubMixin):
         if audios is not None:
             # Audio + text input for generation.
             # Prepare token embeddings and audio embeddings.
+
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self.embed_tokens(tokens_to_embed)
             # TODO: temporary workaround to perform batch_size=1 inference for audio encoder
@@ -701,7 +817,12 @@ class SALM(LightningModule, HFHubMixin):
                 bos_token_id=self.text_bos_id,
                 eos_token_id=self.text_eos_id,
                 pad_token_id=self.text_pad_id,
+                # output_attentions=True,
+                # return_dict_in_generate=True,
             )
+        # else:
+        #     generation_config.output_attentions = True
+        #     generation_config.return_dict_in_generate = True
         # Generate the answers using HF Generate API.
         # Note: we need to put the text embedding layer back to the LLM for processing.
         with move_embedding(self):
@@ -713,257 +834,310 @@ class SALM(LightningModule, HFHubMixin):
                 **generation_kwargs,
                 generation_config=generation_config,
             )  
-
-        if audios is None or not timestamps:
-            return answer_tokens
-
         return_answer_tokens = []
         for batch_idx in range(0,len(audio_embeds)):
+            #
+            # import pdb; pdb.set_trace()
             new_tokens, new_token_ids = self.retokenize_with_separate_space(answer_tokens[batch_idx])
+            #import pdb; pdb.set_trace()
+            # #answer_tokens[batch_idx] = answer_tokens[batch_idx].unsqueeze(0)
+            new_token_ids[0] = self.space_token_id
             text = self.tokenizer.ids_to_text(answer_tokens[batch_idx])
             text = text.strip('!')
+            # new_tokens, new_token_ids = self.retokenize_with_separate_space_no_punctuation(text)
+            # # #import pdb; pdb.set_trace()
+            # new_token_ids = new_token_ids[:-1] + [220] + [128009]
+            #import pdb; pdb.set_trace()
             text_embeds = self.embed_tokens(torch.tensor(new_token_ids, device=self.device))
             audio_and_text_embeds = torch.cat([audio_embeds[batch_idx].unsqueeze(0), text_embeds.unsqueeze(0)],dim=1)
-            audio_and_text_attention_mask = torch.ones(
-                1,
-                audio_and_text_embeds.shape[1],
-                dtype=torch.bool,
-                device=self.device,
-            )
+            audio_and_text_attention_mask = torch.ones(1, audio_and_text_embeds.shape[1], dtype=torch.bool, device=self.device)
 
+            #import pdb; pdb.set_trace()
             with move_embedding(self):
                 if hasattr(self.llm.config, '_attn_implementation'):
                     original_attn_impl = self.llm.config._attn_implementation
                     self.llm.config._attn_implementation = 'eager'
                 with PreSoftmaxCaptureHook(self.llm) as hook_manager:
                     self.llm(inputs_embeds=audio_and_text_embeds, attention_mask=audio_and_text_attention_mask,use_cache=False)
+
                     scores_by_token = hook_manager.get_scores_by_token_and_layer()
             num_text_tokens = len(new_token_ids)
-            needed_scores = scores_by_token[0]
-            audio_len = audio_embed_lens[batch_idx]
-            attention_matrices = torch.stack(
-                [
-                    needed_scores[layer_idx][
-                        :, :, -num_text_tokens:, 1 : audio_len
-                    ]
-                    for layer_idx in range(len(needed_scores))
-                ],
-                dim=0,
-            ).squeeze(1)
-
+            needed_scores = scores_by_token[0] # [batch, heads, query, key]
+            #Forcing first frame to be 0
+            attention_matrices = torch.stack([
+                needed_scores[l][:, :, -num_text_tokens:, 1:audio_embed_lens[batch_idx]] for l in range(0, len(needed_scores))
+            ], dim=0).squeeze(1)
+            #import pdb; pdb.set_trace()
+            #filtered_attention_matrices = self.filter_attention_sink_heads_preserve_layers(attention_matrices,num_edge_frames=4, sigma_threshold=3)
+            #self._visualize_attention_steps(filtered_attention_matrices[0], base_dir='./filtered_attention', batch_idx=batch_idx)
+            # attention_matrix_no_norm = self._process_attention_matrix_no_normalization(filtered_attention_matrices[0],kernel_size=(1, 1, 3))
+            # self._visualize_attention_steps(attention_matrix_no_norm.unsqueeze(0).unsqueeze(0), base_dir='./sigma_3_no_norm_filtered_attention', batch_idx=batch_idx)
             attention_matrix = self._process_attention_matrix(attention_matrices)
             
+
+            # self._visualize_attention_steps(attention_matrix.unsqueeze(0).unsqueeze(0), base_dir='./sigma_3_filtered_attention', batch_idx=batch_idx)
+            #import pdb; pdb.set_trace()
+            # attention_matrices = torch.stack([
+            #     needed_scores[l][:, :, -num_text_tokens:, prompted_embeds.shape[0]: prompted_embeds.shape[0] + audio_embed_lens[batch_idx]] for l in range(0, len(needed_scores))
+            # ], dim=0).squeeze(1)
+            # attention_matrices = torch.stack([
+            #     needed_scores[l][:, :, -num_text_tokens:,6: 6 + audio_embed_lens[batch_idx]] for l in range(0, len(needed_scores))
+            # ], dim=0).squeeze(1)
+
+            # attention_matrices = torch.stack([
+            #     needed_scores[l][:, :, -num_text_tokens:, audio_start_index:audio_embed_lens[batch_idx]+audio_start_index]
+            #     for l in range(5, len(needed_scores))
+            # ], dim=0).squeeze(1)
+            # if len(audios[0]) == 41440:
+#             remaining_frames = torch.stack([
+#     needed_scores[l][:, :, -num_text_tokens:, 6:6 + audio_embed_lens[batch_idx]-1] for l in range(0, len(needed_scores))
+# ], dim=0).squeeze(1)  # Shape: [num_layers, num_heads, num_text_tokens, audio_embed_lens[batch_idx]]
+
+            #import pdb; pdb.set_trace()
+           
+
+
+            # attention_matrices = torch.stack([
+            #     needed_scores[l][:, :, -num_text_tokens: ,audio_start_index : audio_start_index + audio_embed_lens[batch_idx]] for l in range(0, len(needed_scores))
+            # ], dim=0).squeeze(1)
+
+            # attention_matrices = torch.stack([
+            #     needed_scores[l][:, :, -num_text_tokens-1:-1, audio_start_index+num_text_tokens:audio_start_index + num_text_tokens  + audio_embed_lens[batch_idx]] for l in range(0, len(needed_scores))
+            # ], dim=0).squeeze(1)
+            
+           # import pdb; pdb.set_trace()
+            #mport pdb; pdb.set_trace()
+            # num_rows = attention_matrix.shape[0]
+            # even_rows = num_rows - (num_rows % 2)
+            # if even_rows > 0:
+            #     attention_matrix[:even_rows] = attention_matrix[:even_rows].view(-1, 2, attention_matrix.shape[1]).flip(1).reshape(even_rows, -1)
+
+            #import pdb; pdb.set_trace()
             dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
             _, path = dtw_alignment(dtw_input, allow_vertical=True)
             timestamps = create_timestamps_from_dtw_path(path, torch.tensor(new_token_ids), self.tokenizer)
-            if self.space_token_tag_id is not None:
-                word_offsets = self._build_word_offsets_from_retokenized_timestamps(
-                    new_token_ids, timestamps["char"]
-                )
-            else:
-                encoded_char_offsets, new_char_timestamps = create_encoded_char_offsets_from_timestamps(
-                    timestamps, torch.tensor(new_token_ids), self.tokenizer
-                )
-                word_offsets = get_words_offsets(
-                    char_offsets=encoded_char_offsets,
-                    decode_tokens_to_str=self.decode_tokens_to_str,
-                    encoded_char_offsets=new_char_timestamps,
-                    supported_punctuation={",", ".", "!", "?","¿"},
-                )
+            encoded_char_offsets, new_char_timestamps= create_encoded_char_offsets_from_timestamps(
+                timestamps, torch.tensor(new_token_ids), self.tokenizer
+            )
+            word_offsets = get_words_offsets(
+                char_offsets=encoded_char_offsets,
+                decode_tokens_to_str=self.decode_tokens_to_str,
+                encoded_char_offsets=new_char_timestamps,
+                supported_punctuation={',', '.', '!', '?'},
+            )
+
             for word in word_offsets:
                 if  word['start_offset'] > 0:
                     word['start_offset'] = word['start_offset'] - 1
                     word['end_offset'] = word['end_offset'] - 1
                     word['start'] = word['start'] - 0.08
                     word['end'] = word['end'] - 0.08
-            
-            segment_offsets = get_segment_offsets(word_offsets=word_offsets, segment_delimiter_tokens={'.', '!', '?', "...", "¿"})
-            return_answer_tokens.append((answer_tokens[batch_idx].cpu(), word_offsets, segment_offsets))
-
+            #import pdb; pdb.set_trace()
+            #word_offsets
+            #import pdb; pdb.set_trace()
+        
+            return_answer_tokens.append((answer_tokens[batch_idx].cpu(),word_offsets))
         return return_answer_tokens
+                    # This contains valid (non -inf) values because audio positions can attend to all previous text
+            # new_decoding_result = self.decoding.decode_predictions_tensor(
+            #     encoder_hidden_states=enc_states[batch_idx].unsqueeze(0),
+            #     encoder_input_mask=enc_mask[batch_idx].unsqueeze(0),
+            #     decoder_input_ids=new_decoder_input_ids,
+            #     return_hypotheses=trcfg.return_hypotheses,
+            # )
 
-    def decode_tokens_to_str(self, tokens: List[str], lang: Optional[str] = None) -> str:
-        return self.tokenizer.tokens_to_text(tokens)
+            # new_hypotheses, new_xatt_scores = new_decoding_result
+            # new_final_tensor = torch.stack([
+            #     torch.stack([new_xatt_scores[step][layer][:, :,] for step in range(len(new_xatt_scores))], dim=0)
+            #     for layer in range(0)
+            # ], dim=0)
+            # new_final_tensor = new_final_tensor.permute(2, 0, 3, 1, 4, 5).squeeze(-2) # 
+            # valid_lengths = enc_mask.sum(dim=-1).long()  # Shape: [batch_size]
 
-    def _standalone_space_token_id(self) -> int:
-        if self.space_token_tag_id is not None:
-            return self.space_token_tag_id
-        return self.space_token_id
-
-    def _should_prepend_space_before_token(
-        self, token: str, processed_tokens: list[str], space_token: str
-    ) -> bool:
-        if not processed_tokens:
-            return False
-        prev = processed_tokens[-1]
-        if prev in {"ĊĊ", "Ċ"}:
-            return True
-        if prev == space_token:
-            return False
-        if self._is_punctuation_token(prev):
-            return True
-        return False
-
-    def _build_word_offsets_from_retokenized_timestamps(
+            # valid_len = valid_lengths[batch_idx].item()
+            # # slicing each batch item to its valid length
+            # new_attention_matrix = new_final_tensor[0, :, :, :, :valid_len]  # [layers, heads, decoder, valid_len]
+            
+            # # Optional: Visualize attention step-by-step (uncomment to enable)
+            # self._visualize_attention_steps(new_attention_matrix, base_dir='./v2_attention_visualizations_retokenized', batch_idx=batch_idx)
+            # # appling all the transformations to the attention matrix
+            # new_attention_matrix = self._process_attention_matrix(new_attention_matrix, kernel_size=(1, 1, 3))
+            # # DTW takes as an input tensor with batch dimension
+            # new_dtw_input = torch.tensor(new_attention_matrix.unsqueeze(0), device=new_attention_matrix.device).double()
+            # import pdb; pdb.set_trace()
+            # self._visualize_avereged(new_attention_matrix.unsqueeze(0).unsqueeze(0),base_dir='./v2_attention')
+            # from nemo.collections.asr.parts.utils.aligner_utils import dtw_alignment
+            # new_cost, new_path = dtw_alignment(new_dtw_input, allow_vertical=True)
+            # new_timestamps = create_timestamps_from_dtw_path(new_path, torch.tensor(token_ids), self.tokenizer)
+            # new_encoded_char_offsets = create_encoded_char_offsets_from_timestamps(
+            #     new_timestamps, torch.tensor(token_ids), self.tokenizer
+            # )
+            #print(f"new_path {new_path}")
+            # import pdb; pdb.set_trace()
+            # new_word_offsets = get_words_offsets(
+            #     char_offsets=new_encoded_char_offsets,  
+            #     decode_tokens_to_str=self.decoding.decode_tokens_to_str,
+            #     encoded_char_offsets=new_timestamps['char'],
+            #     supported_punctuation={',', '.', '!', '?'},
+                
+            #)
+        return answer_tokens
+    def _visualize_attention_steps(
         self,
-        token_ids: list[int] | torch.Tensor,
-        char_timestamps: list[dict],
-    ) -> list[dict]:
-        """Group DTW token timestamps into words using explicit ``_`` space tokens as delimiters."""
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.tolist()
-
-        if len(char_timestamps) != len(token_ids):
-            logging.warning(
-                f"Token/timestamp length mismatch ({len(token_ids)} ids vs "
-                f"{len(char_timestamps)} timestamps); truncating to the shorter length."
-            )
-            pair_count = min(len(token_ids), len(char_timestamps))
-            token_ids = token_ids[:pair_count]
-            char_timestamps = char_timestamps[:pair_count]
-
-        space_id = self._standalone_space_token_id()
-        supported_punctuation = {",", ".", "!", "?", "¿"}
-        word_offsets: list[dict] = []
-        current_token_strs: list[str] = []
-        current_start_ts: dict | None = None
-        last_content_ts: dict | None = None
-
-        def flush_word() -> None:
-            nonlocal current_token_strs, current_start_ts, last_content_ts
-            if not current_token_strs or current_start_ts is None or last_content_ts is None:
-                current_token_strs = []
-                current_start_ts = None
-                last_content_ts = None
-                return
-            word = self.decode_tokens_to_str(current_token_strs).strip()
-            if word:
-                word_offsets.append(
-                    {
-                        "word": word,
-                        "start_offset": current_start_ts["start_offset"],
-                        "end_offset": last_content_ts["end_offset"],
-                        "start": current_start_ts["start"],
-                        "end": last_content_ts["end"],
-                    }
-                )
-            current_token_strs = []
-            current_start_ts = None
-            last_content_ts = None
-
-        for token_id, ts in zip(token_ids, char_timestamps):
-            tid = token_id.item() if isinstance(token_id, torch.Tensor) else token_id
-            token_str = self.tokenizer.ids_to_tokens([tid])[0]
-
-            if tid == space_id:
-                flush_word()
-                continue
-
-            if self._is_special_token(token_str) or token_str in {"ĊĊ", "Ċ"}:
-                flush_word()
-                continue
-
-            decoded = self.tokenizer.tokens_to_text([token_str]).strip()
-            if decoded in supported_punctuation or self._is_punctuation_token(token_str):
-                if current_token_strs:
-                    current_token_strs.append(token_str)
-                    last_content_ts = ts
-                    flush_word()
-                elif word_offsets:
-                    word_offsets[-1]["word"] = f"{word_offsets[-1]['word'].rstrip()}{decoded}"
-                    word_offsets[-1]["end_offset"] = ts["end_offset"]
-                    word_offsets[-1]["end"] = ts["end"]
-                continue
-
-            if not current_token_strs:
-                current_start_ts = ts
-            current_token_strs.append(token_str)
-            last_content_ts = ts
-
-        flush_word()
-        return word_offsets
-
-    def _retokenize_training_batch(self, batch: dict) -> dict:
-        pad_id = self.text_pad_id
-        retokenized_ids = []
-        retokenized_masks = []
-        for input_ids, loss_mask in zip(batch["input_ids"], batch["loss_mask"]):
-            valid = input_ids != pad_id
-            if not valid.any():
-                retokenized_ids.append(input_ids.tolist())
-                retokenized_masks.append(loss_mask.tolist())
-                continue
-            start_idx = valid.nonzero(as_tuple=True)[0][0].item()
-            seq_ids = input_ids[start_idx:].tolist()
-            seq_mask = loss_mask[start_idx:].tolist()
-            new_seq_ids, new_seq_mask = self._retokenize_loss_regions(seq_ids, seq_mask)
-            retokenized_ids.append(new_seq_ids)
-            retokenized_masks.append(new_seq_mask)
-
-        max_len = max(len(seq) for seq in retokenized_ids)
-        padded_ids = torch.full((len(retokenized_ids), max_len), pad_id, dtype=batch["input_ids"].dtype)
-        padded_masks = torch.zeros((len(retokenized_masks), max_len), dtype=batch["loss_mask"].dtype)
-        for batch_idx, (seq_ids, seq_mask) in enumerate(zip(retokenized_ids, retokenized_masks)):
-            offset = max_len - len(seq_ids)
-            padded_ids[batch_idx, offset:] = torch.tensor(seq_ids, dtype=batch["input_ids"].dtype)
-            padded_masks[batch_idx, offset:] = torch.tensor(seq_mask, dtype=batch["loss_mask"].dtype)
-
-        return {
-            **batch,
-            "input_ids": padded_ids.to(batch["input_ids"].device),
-            "loss_mask": padded_masks.to(batch["loss_mask"].device),
-        }
-
-    def _retokenize_loss_regions(
-        self, ids: list[int], mask: list[bool]
-    ) -> tuple[list[int], list[bool]]:
-        result_ids: list[int] = []
-        result_mask: list[bool] = []
-        idx = 0
-        while idx < len(ids):
-            if not mask[idx]:
-                result_ids.append(ids[idx])
-                result_mask.append(mask[idx])
-                idx += 1
-                continue
-
-            region_end = idx
-            while region_end < len(mask) and mask[region_end]:
-                region_end += 1
-            _, new_ids, new_mask = self.retokenize_with_separate_space(
-                ids[idx:region_end],
-                mask=mask[idx:region_end],
-            )
-            result_ids.extend(new_ids)
-            result_mask.extend(new_mask)
-            idx = region_end
-        return result_ids, result_mask
-
-    def _is_special_token(self, token: str) -> bool:
-        return token.startswith("<")
-
-    def _is_punctuation_token(self, token: str) -> bool:
-        stripped = token.lstrip(self.space_prefix_char)
-        return bool(stripped) and not any(c.isalnum() for c in stripped)
-
-    def _append_space_token(
-        self,
-        processed_tokens: list[str],
-        processed_masks: list[bool] | None,
-        space_token: str,
-        token_mask: bool | None,
-    ) -> None:
-        if processed_tokens and processed_tokens[-1] == space_token:
-            return
-        processed_tokens.append(space_token)
-        if processed_masks is not None:
-            processed_masks.append(token_mask)
-
-    def retokenize_with_separate_space(
-        self,
-        ids: torch.Tensor | list[int],
-        mask: list[bool] | None = None,
+        attention_matrix: torch.Tensor,
+        base_dir: str = './attention_visualizations_batch',
+        batch_idx: int = 0
     ):
+        """
+        Visualize attention matrices step-by-step through transformations.
+        Saves layer-wise and head-wise plots at each step.
+        
+        Args:
+            attention_matrix: Input tensor [layers, heads, decoder_steps, encoder_steps]
+            base_dir: Base directory for saving visualizations
+            batch_idx: Batch index for labeling
+        """
+        import os
+
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import median_filter
+        base_dir += f'_batch_{batch_idx}'
+        L, H, T, F = attention_matrix.shape
+        
+        # Step 1: Raw attention (after masking)
+        step_dir = os.path.join(base_dir, f'1_raw_attention')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_matrix[layer_idx, head_idx].cpu().float().numpy(), 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'Raw - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 2: After median filter
+        attention_filtered = median_filter(attention_matrix.double().cpu().numpy(), (1, 1, 1, 1))
+        step_dir = os.path.join(base_dir, '2_after_median_filter')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_filtered[layer_idx, head_idx], 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'After Filter - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 3: After softmax
+        attention_softmax = torch.tensor(attention_filtered).softmax(dim=-1)
+        step_dir = os.path.join(base_dir, '3_after_softmax')
+        for layer_idx in range(L):
+            for head_idx in range(H):
+                os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+                plt.figure(figsize=(10, 6))
+                plt.imshow(attention_softmax[layer_idx, head_idx].cpu().float().numpy(), 
+                          cmap='viridis', aspect='auto', origin='lower')
+                plt.colorbar(label='Attention Value')
+                plt.xlabel('Encoder Steps (Audio Frames)')
+                plt.ylabel('Decoder Steps (Text Tokens)')
+                plt.title(f'After Softmax - Batch {batch_idx} - Layer {layer_idx} - Head {head_idx}')
+                plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'head_{head_idx}.png'), 
+                           dpi=150, bbox_inches='tight')
+                plt.close()
+        
+        # Step 4: After averaging heads (per-layer only)
+        attention_avg_heads = attention_softmax.mean(dim=1)  # [L, T, F]
+        step_dir = os.path.join(base_dir, '4_after_avg_heads')
+        for layer_idx in range(L):
+            os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_avg_heads[layer_idx].cpu().float().numpy(), 
+                      cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Attention Value')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'After Avg Heads - Batch {batch_idx} - Layer {layer_idx}')
+            plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'aggregated.png'), 
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        # Step 5: After normalization (per-layer)
+        attention_normalized = attention_avg_heads / (attention_avg_heads.norm(dim=-2, keepdim=True) + 1e-8)
+        step_dir = os.path.join(base_dir, '5_after_normalization')
+        for layer_idx in range(L):
+            os.makedirs(os.path.join(step_dir, f'layer_{layer_idx}'), exist_ok=True)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(attention_normalized[layer_idx].cpu().float().numpy(), 
+                      cmap='viridis', aspect='auto', origin='lower')
+            plt.colorbar(label='Attention Value')
+            plt.xlabel('Encoder Steps (Audio Frames)')
+            plt.ylabel('Decoder Steps (Text Tokens)')
+            plt.title(f'After Normalization - Batch {batch_idx} - Layer {layer_idx}')
+            plt.savefig(os.path.join(step_dir, f'layer_{layer_idx}', f'normalized.png'), 
+                       dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        print(f"Visualizations saved to {base_dir}/ - {L} layers, {H} heads per layer")
+
+
+    def retokenize_with_separate_space_no_punctuation(self, text: str):
+        """
+        Retokenize BPE text by removing all punctuations first, then separating the
+        space-prefix character from tokens.
+
+        1. Removes all punctuation characters (preserving trailing period if present)
+        2. Splits tokens whose first character matches ``self.space_prefix_char`` into
+           a standalone space token and the remainder
+        3. Prepends a space token and appends the EOS token
+
+        Args:
+            text: Input text string to retokenize
+
+        Returns:
+            tuple: (tokens, token_ids)
+        """
+        import string
+        ends_with_period = text.rstrip().endswith('.')
+
+        text_no_punct = text.translate(str.maketrans('', '', string.punctuation))
+
+        if ends_with_period:
+            text_no_punct = text_no_punct.rstrip() + '.'
+
+        bpe_tokens = self.tokenizer.text_to_tokens(text_no_punct)
+        sp = self.space_prefix_char
+
+        processed_tokens = [sp]
+
+        for token in bpe_tokens:
+            if token.startswith(sp):
+                rest_of_token = token[len(sp):]
+                if rest_of_token:
+                    processed_tokens.append(sp)
+                    processed_tokens.append(token)
+                else:
+                    processed_tokens.append(sp)
+            else:
+                processed_tokens.append(token)
+
+        processed_tokens.append(self.tokenizer.ids_to_tokens([self.tokenizer.eos_id])[0])
+        token_ids = []
+        for token in processed_tokens:
+            token_ids.append(self.tokenizer.tokens_to_ids(token))
+        return processed_tokens, token_ids
+
+    def retokenize_with_separate_space(self, ids):
         """
         Retokenize BPE token IDs by separating the space-prefix character from tokens.
 
@@ -973,75 +1147,37 @@ class SALM(LightningModule, HFHubMixin):
 
         Args:
             ids: Token IDs (list or tensor) to retokenize
-            mask: Optional per-token loss mask aligned with ``ids``
 
         Returns:
-            tuple: (tokens, token_ids) or (tokens, token_ids, mask) when ``mask`` is provided
+            tuple: (tokens, token_ids)
         """
-        if isinstance(ids, torch.Tensor):
-            ids = ids.tolist()
-        if mask is not None:
-            assert len(mask) == len(ids)
-
         bpe_tokens = self.tokenizer.ids_to_tokens(ids)
         sp = self.space_prefix_char
-        space_token = self.tokenizer.ids_to_tokens([self._standalone_space_token_id()])[0]
-        has_llama_header = any(self._is_special_token(t) for t in bpe_tokens)
-        content_started = not has_llama_header
 
-        processed_tokens: list[str] = []
-        processed_masks = [] if mask is not None else None
-        for token, id_token, token_mask in zip(
-            bpe_tokens,
-            ids,
-            mask if mask is not None else [None] * len(ids),
-        ):
-            if isinstance(id_token, torch.Tensor):
-                id_token = id_token.item()
+        processed_tokens = ['']
+        for token, id_token in zip(bpe_tokens, ids):
             if id_token == 0:
-                continue
-            if token in {"ĊĊ", "Ċ"}:
-                processed_tokens.append(token)
-                if mask is not None:
-                    processed_masks.append(token_mask)
-                content_started = True
                 continue
             if token.startswith(sp):
                 rest_of_token = token[len(sp):]
                 if rest_of_token:
-                    if content_started:
-                        self._append_space_token(processed_tokens, processed_masks, space_token, token_mask)
+                    processed_tokens.append(sp)
                     processed_tokens.append(token)
-                    if mask is not None:
-                        processed_masks.append(token_mask)
                 else:
                     processed_tokens.append(token)
-                    if mask is not None:
-                        processed_masks.append(token_mask)
             else:
-                if (
-                    content_started
-                    and not self._is_special_token(token)
-                    and not self._is_punctuation_token(token)
-                    and self._should_prepend_space_before_token(token, processed_tokens, space_token)
-                ):
-                    self._append_space_token(processed_tokens, processed_masks, space_token, token_mask)
                 processed_tokens.append(token)
-                if mask is not None:
-                    processed_masks.append(token_mask)
 
-        token_ids = [self.tokenizer.tokens_to_ids(token) for token in processed_tokens]
-        if mask is not None:
-            assert len(token_ids) == len(processed_masks)
-            return processed_tokens, token_ids, processed_masks
+        token_ids = []
+        for token in processed_tokens:
+            token_ids.append(self.tokenizer.tokens_to_ids(token))
         return processed_tokens, token_ids
 
-    def _process_attention_matrix(
-        self,
-        attention_matrix: torch.Tensor,
+    def _process_attention_matrix(self,
+        attention_matrix:torch.Tensor,
         kernel_size: tuple[int, int, int] = (1, 1, 1),
         qk_scale_factor: float = 1.0,
-    ) -> torch.Tensor:
+        ) -> torch.Tensor:
         from scipy.ndimage import median_filter
         
         L, H, T, F = attention_matrix.shape
@@ -1061,6 +1197,147 @@ class SALM(LightningModule, HFHubMixin):
         attention_matrix = attention_matrix/attention_matrix.norm(dim=-2, keepdim=True)
         
         return attention_matrix
+
+
+    def _process_attention_matrix_no_normalization(self,
+        attention_matrix:torch.Tensor,
+        kernel_size: tuple[int, int, int] = (1, 1, 1),
+        qk_scale_factor: float = 1.0,
+        ) -> torch.Tensor:
+        from scipy.ndimage import median_filter
+        
+        L, H, T, F = attention_matrix.shape
+        # flattening with respect to layers and heads
+        attention_matrix = attention_matrix.reshape(L*H, T, F)
+        # applying median filter
+        attention_matrix = median_filter(attention_matrix.double().cpu().numpy(), kernel_size)
+        # applying softmax to the coloumns
+        attention_matrix = torch.tensor(attention_matrix * qk_scale_factor).softmax(dim=-1)
+        # averaging across layers and heads
+        attention_matrix = attention_matrix.mean(axis=(0))
+    
+        return attention_matrix
+    
+    def _extract_audio_attention_from_scores(
+        self,
+        scores_by_token: list[list[torch.Tensor]],
+        tokens: torch.Tensor,
+        placeholder_id: int,
+        audio_embed_lens: torch.Tensor | list[int],
+        padding_id: int,
+    ) -> list[list[torch.Tensor]]:
+        """
+        Extract attention scores that attend only to audio embedding positions.
+        
+        For the first token (prefill phase), extracts attention from the last query position.
+        For subsequent tokens, extracts attention from the single new query position.
+        
+        Args:
+            scores_by_token: list[token_idx][layer_idx] of attention scores with shape
+                            [batch, num_heads, query_len, key_len]
+            tokens: Original token IDs before replacement, shape [batch, seq_len]
+            placeholder_id: ID of the placeholder token that gets replaced by audio
+            audio_embed_lens: Tensor or list of audio embedding lengths
+            padding_id: ID of padding tokens
+        
+        Returns:
+            list[token_idx][layer_idx] of attention scores with shape 
+            [batch, num_heads, num_audio_positions] containing attention from 
+            the new generated token to audio positions only.
+        """
+        # Convert to list if tensor
+        if isinstance(audio_embed_lens, torch.Tensor):
+            audio_embed_lens = audio_embed_lens.tolist()
+        
+        # Find audio positions in the final sequence after replacement
+        audio_positions = self._find_audio_positions_in_final_sequence(
+            tokens, placeholder_id, audio_embed_lens, padding_id
+        )
+        
+        # Extract attention to audio positions for each generated token
+        audio_attention_scores = []
+        
+        for token_idx, token_layers in enumerate(scores_by_token):
+            token_audio_scores = []
+            
+            for layer_idx, attn_scores in enumerate(token_layers):
+                # attn_scores shape: [batch, num_heads, query_len, key_len]
+                # For first token (prefill): query_len > 1, we want the last query position
+                # For subsequent tokens: query_len = 1, we want that single position
+                
+                batch_size = attn_scores.shape[0]
+                batch_audio_attn = []
+                
+                for batch_idx in range(batch_size):
+                    if batch_idx < len(audio_positions) and len(audio_positions[batch_idx]) > 0:
+                        audio_pos = audio_positions[batch_idx]
+                        # Extract last query position attending to audio key positions
+                        # [num_heads, query_len, key_len] -> [num_heads, num_audio_positions]
+                        audio_attn = attn_scores[batch_idx, :, -1, audio_pos]
+                        batch_audio_attn.append(audio_attn)
+                
+                if batch_audio_attn:
+                    # Stack across batch: [batch, num_heads, num_audio_positions]
+                    token_audio_scores.append(torch.stack(batch_audio_attn, dim=0))
+                else:
+                    token_audio_scores.append(None)
+            
+            audio_attention_scores.append(token_audio_scores)
+        
+        return audio_attention_scores
+    
+    def _find_audio_positions_in_final_sequence(
+        self,
+        tokens: torch.Tensor,
+        placeholder_id: int,
+        audio_embed_lens: list[int],
+        padding_id: int,
+    ) -> list[list[int]]:
+        """
+        Find positions where audio embeddings are located in the final sequence.
+        
+        This mimics the logic of replace_placeholders_and_build_targets to determine
+        where audio embeddings end up after placeholder replacement.
+        
+        Args:
+            tokens: Original token IDs tensor of shape [batch, seq_len]
+            placeholder_id: ID of the audio placeholder token
+            audio_embed_lens: List of lengths for each audio embedding
+            padding_id: ID of padding tokens
+        
+        Returns:
+            List of lists, where each inner list contains the indices of audio positions
+            for that batch element in the final (after-replacement) sequence.
+        """
+        batch_size = tokens.shape[0]
+        audio_positions = []
+        audio_idx = 0
+        
+        for batch_idx in range(batch_size):
+            positions = []
+            current_pos = 0
+            
+            for token_idx in range(tokens.shape[1]):
+                token_id = tokens[batch_idx, token_idx].item()
+                
+                # Skip padding tokens (they are removed by _unpad_inputs in replace_placeholders_and_build_targets)
+                if token_id == padding_id:
+                    continue
+                
+                if token_id == placeholder_id:
+                    # This placeholder will be replaced by audio embeddings
+                    audio_len = audio_embed_lens[audio_idx]
+                    # Audio embeddings occupy positions [current_pos, current_pos + audio_len)
+                    positions.extend(range(current_pos, current_pos + audio_len))
+                    current_pos += audio_len
+                    audio_idx += 1
+                else:
+                    # Regular token occupies one position
+                    current_pos += 1
+            
+            audio_positions.append(positions)
+        
+        return audio_positions
 
     def configure_optimizers(self):
         return configure_optimizers(self)
@@ -1159,7 +1436,12 @@ class SALM(LightningModule, HFHubMixin):
             self.embed_tokens = fully_shard(self.embed_tokens, **fsdp_config)
             llm.lm_head = fully_shard(llm.lm_head, **fsdp_config)
             self.llm = fully_shard(self.llm, **fsdp_config)
+            #self.perception.modality_adapter = fully_shard(self.perception.modality_adapter, **fsdp_config)
+            #self.perception.asr.preprocessor = fully_shard(self.perception.asr.preprocessor **fsdp_config)
+            #self.perception.asr.encoder = fully_shard(self.perception.asr.encoder, **fsdp_config)
             self.perception = fully_shard(self.perception, **fsdp_config)
+            register_fsdp_forward_method(self.perception, "forward_encoder")
+            # register_fsdp_forward_method(self.perception, "transcribe_encoded")
 
     @property
     def oomptimizer_schema(self) -> dict:
@@ -1183,188 +1465,32 @@ class SALM(LightningModule, HFHubMixin):
         }
 
 
-def replace_placeholders_and_build_targets(
-    input_ids: torch.Tensor,
-    embeds: torch.Tensor,
-    padding_id: int,
-    placeholder_id: int,
-    replacements: list[torch.Tensor],
-    target_ids: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-    """Replaces each occurrence of the placeholder_id in input_ids with the corresponding tensor
-    from the replacements list in the embeds tensor, and creates corresponding adjusted target_ids.
-
-    Note: when padding is necessary, we apply left-padding to the examples not to introduce
-        anomalies at generation time.
-
-    Args:
-      input_ids (Tensor): shape (batch, sequence_length); input token ids.
-      embeds (Tensor): shape (batch, sequence_length, hidden_dim); embeddings for each token.
-      padding_id (int): these IDs will be marked as ignore_index in target_ids.
-      placeholder_id (int): an id to be replaced.
-      replacements (list of Tensor): each Tensor has shape (L_i, hidden_dim), with L_i arbitrary.
-      target_ids (Tensor): shape (batch, sequence_length); target token ids.
-
-    Returns:
-      Tuple[Tensor, Tensor, Tensor]:
-        - Tensor of shape (batch, max_new_sequence_length, hidden_dim) corresponding to
-          ``embeds`` after replacements.
-        - Tensor of shape (batch, max_new_sequence_length) with adjusted target IDs where:
-          * Original target values are preserved where input was not a placeholder or padding
-          * Positions that were placeholders, padding, or added by replacements are set to -100
-          Will be None if target_ids input was None.
-        - Tensor of shape (batch, max_new_sequence_length) with attention padding masks
-          updated to account for shape changes due to replacements.
+def setup_speech_encoder_with_asr(model: torch.nn.Module, pretrained_weights: bool = True):
     """
-    batch_size, seq_len = input_ids.size()
-    if target_ids is not None:
-        assert target_ids.size() == input_ids.size(), "target_ids must have the same shape as input_ids"
+    Sets up an ``AudioPerceptionModule``, initializing its ``encoder`` and ``preprocessor``
+    with a pretrained NeMo ``ASRModel``.
+    The result is assigned to ``model.perception`` attribute and is trainable.
+    """
+    with open_dict(model.cfg):
+        model.cfg.output_dim = model.llm.config.hidden_size
+    model.perception = AudioTranscriptionPerceptionModule(model.cfg.perception, model.cfg.pretrained_asr).train()
 
-    hidden_dim = embeds.size(2)
-    device, dtype = embeds.device, embeds.dtype
-    ignore_index = -100  # Standard ignore_index value for CrossEntropyLoss
+    # from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 
-    # Un-pad the tensors because we'll need to re-apply new padding after replacements anyway.
-    input_ids, embeds, target_ids = _unpad_inputs(input_ids, embeds, target_ids, padding_id)
-
-    output_sequences = []
-    output_target_ids = []
-    output_att_masks = []
-    replacement_idx = 0
-
-    for i in range(batch_size):
-        # Find all placeholder positions at once using tensor operations
-        placeholder_positions = (input_ids[i] == placeholder_id).nonzero(as_tuple=True)[0]
-
-        # Handle the case with no placeholders more efficiently
-        if len(placeholder_positions) == 0:
-            output_sequences.append(embeds[i])
-
-            # Start with original target_ids and replace positions where input was padding
-            if target_ids is not None:
-                new_target_ids = target_ids[i].clone()
-                new_target_ids[input_ids[i] == padding_id] = ignore_index
-                output_target_ids.append(new_target_ids)
-            output_att_masks.append(input_ids[i] != padding_id)
-            continue
-
-        # Build segments between placeholders
-        segments = []  # For embeddings
-        target_segments = []  # For target IDs
-        att_masks = []
-        prev_pos = 0
-
-        for pos in placeholder_positions:
-            # Add segment before placeholder (if any)
-            if pos > prev_pos:
-                segments.append(embeds[i][prev_pos:pos])
-
-                # For target IDs: keep original targets but mark positions that were padding in input
-                if target_ids is not None:
-                    segment_target_ids = target_ids[i][prev_pos:pos].clone()
-                    segment_target_ids[segment_target_ids == padding_id] = ignore_index
-                    target_segments.append(segment_target_ids)
-                att_masks.append(input_ids[i][prev_pos:pos] != padding_id)
-
-            # Add replacement for embeddings
-            rep = replacements[replacement_idx]
-            segments.append(rep)
-
-            # For target IDs: all replacement positions get ignore_index
-            target_segments.append(torch.full((rep.size(0),), ignore_index, dtype=torch.long, device=device))
-            att_masks.append(torch.ones((rep.size(0),), dtype=torch.bool, device=device))
-
-            replacement_idx += 1
-            prev_pos = pos + 1  # Skip placeholder
-
-        # Add remaining segment after last placeholder (if any)
-        if prev_pos < seq_len:
-            segments.append(embeds[i][prev_pos:seq_len])
-
-            # For target IDs: keep original targets but mark positions that were padding in input
-            if target_ids is not None:
-                segment_target_ids = target_ids[i][prev_pos:seq_len].clone()
-                segment_target_ids[segment_target_ids == padding_id] = ignore_index
-                target_segments.append(segment_target_ids)
-            att_masks.append(input_ids[i][prev_pos:seq_len] != padding_id)
-
-        # Concatenate all segments for this example
-        output_sequences.append(torch.cat(segments, dim=0))
-        output_att_masks.append(torch.cat(att_masks, dim=0))
-        if target_ids is not None:
-            output_target_ids.append(torch.cat(target_segments, dim=0))
-
-    # Verify all replacements were used
-    if replacement_idx != len(replacements):
-        raise ValueError(f"Expected {len(replacements)} replacements but used {replacement_idx}")
-
-    # Create padded output tensors
-    max_seq_length = max(seq.size(0) for seq in output_sequences)
-    output = torch.zeros(batch_size, max_seq_length, hidden_dim, device=device, dtype=dtype)
-    if target_ids is not None:
-        new_target_ids = torch.full((batch_size, max_seq_length), ignore_index, dtype=torch.long, device=device)
-    else:
-        new_target_ids = None
-    attention_masks = torch.zeros((batch_size, max_seq_length), dtype=torch.bool, device=device)
-
-    if target_ids is None:
-        output_target_ids = repeat(None)
-    for i, (seq, tgt, att) in enumerate(zip(output_sequences, output_target_ids, output_att_masks)):
-        seq_len = seq.size(0)
-        output[i, -seq_len:] = seq
-        if tgt is not None:
-            new_target_ids[i, -seq_len:] = tgt
-        attention_masks[i, -seq_len:] = att
-
-    return output, new_target_ids, attention_masks
+    # WithOptionalCudaGraphs.disable_cuda_graphs_recursive(model.perception.asr, attribute_path="decoding.decoding")
 
 
-def _unpad_inputs(
-    input_ids: torch.Tensor,
-    embeds: torch.Tensor,
-    target_ids: Optional[torch.Tensor],
-    padding_id: int,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    def first_index_not_value(tensor, value):
-        mask = tensor != value
-        indices = torch.nonzero(mask, as_tuple=False)
-        if indices.numel() > 0:
-            return indices[0].item()
-        else:
-            return -1
+def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):
+    end = torch.isin(answer, torch.tensor(eos_tokens)).nonzero(as_tuple=True)[0]
+    if end.numel() == 0:
+        return answer
+    end = end[0]
+    return answer[:end]
 
-    input_ids_unpad, embeds_unpad = [], []
-    target_ids_unpad = [] if target_ids is not None else None
-    for i in range(input_ids.shape[0]):
-        idx = first_index_not_value(input_ids[i], padding_id)
-        input_ids_unpad.append(input_ids[i, idx:])
-        embeds_unpad.append(embeds[i, idx:])
-        if target_ids is not None:
-            target_ids_unpad.append(target_ids[i, idx:])
-    return input_ids_unpad, embeds_unpad, target_ids_unpad
-
-
-def _resolve_audios_in_prompt(
-    prompts: list[list[dict]], sampling_rate: int, device: str | torch.device
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    from lhotse import Recording
-
-    paths = []
-    for conversation in prompts:
-        for turn in conversation:
-            if "audio" in turn:
-                turn_audio = turn["audio"]
-                if isinstance(turn_audio, (str, Path)):
-                    turn_audio = [turn_audio]
-                for p in turn_audio:
-                    assert isinstance(p, (str, Path)), f"Invalid value under prompt key 'audio': {p}"
-                    paths.append(p)
-    if not paths:
-        return None
-    cuts = CutSet([Recording.from_file(p).to_cut() for p in paths])
-    with torch.device("cpu"):  # workaround for a Lhotse issue when default device is CUDA during collation
-        audio, audio_lens = cuts.resample(sampling_rate).load_audio(collate=True)
-    return (
-        torch.as_tensor(audio).to(device, non_blocking=True),
-        torch.as_tensor(audio_lens).to(device, non_blocking=True),
-    )
+def strip_response_if_any(
+    conversation: NeMoMultimodalConversation,
+) -> NeMoMultimodalConversation:
+    turns = conversation.turns
+    while turns[-1].role == "assistant":
+        turns = turns[:-1]
+    return fastcopy(conversation, turns=turns)
