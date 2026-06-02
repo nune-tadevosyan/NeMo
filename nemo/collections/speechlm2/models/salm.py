@@ -44,7 +44,6 @@ from nemo.collections.asr.parts.utils.timestamp_utils import get_words_offsets, 
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
-from nemo.collections.speechlm2.modules.perception import AudioTranscriptionPerceptionModule
 from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
 from nemo.collections.speechlm2.parts.lora import maybe_install_lora
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
@@ -219,19 +218,23 @@ class SALM(LightningModule, HFHubMixin):
         self.save_hyperparameters()
         self.cfg = DictConfig(cfg)
         self.audio_locator_tag = self.cfg.audio_locator_tag
+        self.space_token_tag = self.cfg.get("space_token_tag", "_")
 
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
-        self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
+        special_tokens = [self.audio_locator_tag]
+        if self.space_token_tag and self.space_token_tag not in self.tokenizer.tokenizer.get_vocab():
+            special_tokens.append(self.space_token_tag)
+        self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.llm = load_pretrained_hf(self.cfg.pretrained_llm, pretrained_weights=self.cfg.pretrained_weights)
         # Note: we have to "move out" the token embedding outside of LLM to avoid
         #       messing up FSDP/TP hooks.
         self.embed_tokens = self.llm.model.embed_tokens
         del self.llm.model.embed_tokens
+        if self.tokenizer.vocab_size > self.embed_tokens.num_embeddings:
+            self.embed_tokens = self._resize_token_embeddings(self.tokenizer.vocab_size)
 
         # Load the pretrained streaming ASR model and copy its parameters into the audio perception module.
         setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
-
-        assert isinstance(self.perception, AudioTranscriptionPerceptionModule)
 
         # Load pretrained weights if provided
         if (init_from_path := self.cfg.get("init_from_path", None)) is not None:
@@ -244,7 +247,8 @@ class SALM(LightningModule, HFHubMixin):
             with safe_open(init_from_path / "model.safetensors", framework="pt") as f:
                 for k in f.keys():
                     tensors[k] = f.get_tensor(k)
-            missing_keys, unexpected_keys = self.load_state_dict(tensors, strict=False)
+            filtered_tensors = self._filter_checkpoint_for_vocab_expansion(tensors)
+            missing_keys, unexpected_keys = self.load_state_dict(filtered_tensors, strict=False)
             logging.warning(f"Missing keys: {missing_keys}")
             logging.warning(f"Unexpected keys: {unexpected_keys}")
 
@@ -335,6 +339,52 @@ class SALM(LightningModule, HFHubMixin):
     @property
     def audio_locator_tag_id(self) -> int:
         return self.tokenizer.token_to_id(self.audio_locator_tag)
+
+    @property
+    def space_token_tag_id(self) -> int | None:
+        if self.space_token_tag is None:
+            return None
+        return self.tokenizer.token_to_id(self.space_token_tag)
+
+    def _resize_token_embeddings(self, new_num_tokens: int) -> torch.nn.Embedding:
+        old_embeddings = self.embed_tokens
+        new_embeddings = torch.nn.Embedding(
+            new_num_tokens,
+            old_embeddings.embedding_dim,
+            dtype=old_embeddings.weight.dtype,
+            device=old_embeddings.weight.device,
+        )
+        num_to_copy = min(old_embeddings.num_embeddings, new_num_tokens)
+        new_embeddings.weight.data[:num_to_copy] = old_embeddings.weight.data[:num_to_copy]
+        return new_embeddings
+
+    def _filter_checkpoint_for_vocab_expansion(self, checkpoint: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Load checkpoint weights, partially copying vocab-sized tensors when tokenizer was expanded."""
+        model_state = self.state_dict()
+        filtered: dict[str, torch.Tensor] = {}
+        for key, value in checkpoint.items():
+            if key not in model_state:
+                continue
+            target = model_state[key]
+            if target.shape == value.shape:
+                filtered[key] = value
+            elif (
+                target.ndim >= 1
+                and value.ndim >= 1
+                and target.shape[1:] == value.shape[1:]
+                and target.shape[0] != value.shape[0]
+            ):
+                merged = target.clone()
+                num_rows = min(target.shape[0], value.shape[0])
+                merged[:num_rows] = value[:num_rows]
+                filtered[key] = merged
+                logging.info(
+                    f"Partially loaded {key}: copied {num_rows}/{target.shape[0]} vocab rows "
+                    f"(checkpoint={value.shape[0]}, model={target.shape[0]})"
+                )
+            else:
+                logging.info(f"Skipping {key}: shape mismatch {tuple(value.shape)} vs {tuple(target.shape)}")
+        return filtered
 
     @property
     def token_equivalent_duration(self) -> float:
@@ -637,7 +687,8 @@ class SALM(LightningModule, HFHubMixin):
             # Text-only generation.
             attention_mask = tokens != self.text_pad_id
             generation_inputs = {"input_ids": tokens, "attention_mask": attention_mask}
-        if ground_truth_texts is not None and timestamps:
+        using_ground_truth = ground_truth_texts is not None and timestamps
+        if using_ground_truth:
             assert audios is not None, "audios must be provided when using ground_truth_texts with timestamps"
             assert len(ground_truth_texts) == len(audio_embeds), (
                 f"ground_truth_texts length ({len(ground_truth_texts)}) must match "
@@ -671,8 +722,13 @@ class SALM(LightningModule, HFHubMixin):
         for batch_idx in range(0, len(audio_embeds)):
             batch_token_ids = answer_tokens[batch_idx]
             new_tokens, new_token_ids = self.retokenize_with_separate_space(batch_token_ids)
-            if new_token_ids:
-                new_token_ids[0] = self.space_token_id
+            if using_ground_truth:
+                space_id = self._standalone_space_token_id()
+                if not new_token_ids or new_token_ids[0] != space_id:
+                    new_token_ids = [space_id] + new_token_ids
+                eos_id = self.text_eos_id
+                if not new_token_ids or new_token_ids[-1] != eos_id:
+                    new_token_ids = new_token_ids + [eos_id]
             text = self.tokenizer.ids_to_text(batch_token_ids)
             text = text.strip('!')
             text_embeds = self.embed_tokens(torch.tensor(new_token_ids, device=self.device))
@@ -697,7 +753,7 @@ class SALM(LightningModule, HFHubMixin):
             attention_matrices = torch.stack(
                 [
                     needed_scores[layer_idx][
-                        :, :, -num_text_tokens:, 1 : audio_len
+                        :, :, -num_text_tokens:, 1 : audio_len-1
                     ]
                     for layer_idx in range(len(needed_scores))
                 ],
@@ -709,15 +765,20 @@ class SALM(LightningModule, HFHubMixin):
             dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
             _, path = dtw_alignment(dtw_input, allow_vertical=True)
             timestamps = create_timestamps_from_dtw_path(path, torch.tensor(new_token_ids), self.tokenizer)
-            encoded_char_offsets, new_char_timestamps= create_encoded_char_offsets_from_timestamps(
-                timestamps, torch.tensor(new_token_ids), self.tokenizer
-            )
-            word_offsets = get_words_offsets(
-                char_offsets=encoded_char_offsets,
-                decode_tokens_to_str=self.decode_tokens_to_str,
-                encoded_char_offsets=new_char_timestamps,
-                supported_punctuation={",", ".", "!", "?","¿"},
-            )
+            if self.space_token_tag_id is not None:
+                word_offsets = self._build_word_offsets_from_retokenized_timestamps(
+                    new_token_ids, timestamps["char"]
+                )
+            else:
+                encoded_char_offsets, new_char_timestamps = create_encoded_char_offsets_from_timestamps(
+                    timestamps, torch.tensor(new_token_ids), self.tokenizer
+                )
+                word_offsets = get_words_offsets(
+                    char_offsets=encoded_char_offsets,
+                    decode_tokens_to_str=self.decode_tokens_to_str,
+                    encoded_char_offsets=new_char_timestamps,
+                    supported_punctuation={",", ".", "!", "?","¿"},
+                )
             for word in word_offsets:
                 if  word['start_offset'] > 0:
                     word['start_offset'] = word['start_offset'] - 1
@@ -733,7 +794,129 @@ class SALM(LightningModule, HFHubMixin):
     def decode_tokens_to_str(self, tokens: List[str], lang: Optional[str] = None) -> str:
         return self.tokenizer.tokens_to_text(tokens)
 
-    def retokenize_with_separate_space(self, ids: torch.Tensor | list[int]):
+    def _standalone_space_token_id(self) -> int:
+        if self.space_token_tag_id is not None:
+            return self.space_token_tag_id
+        return self.space_token_id
+
+    def _should_prepend_space_before_token(
+        self, token: str, processed_tokens: list[str], space_token: str
+    ) -> bool:
+        if not processed_tokens:
+            return False
+        prev = processed_tokens[-1]
+        if prev in {"ĊĊ", "Ċ"}:
+            return True
+        if prev == space_token:
+            return False
+        if self._is_punctuation_token(prev):
+            return True
+        return False
+
+    def _build_word_offsets_from_retokenized_timestamps(
+        self,
+        token_ids: list[int] | torch.Tensor,
+        char_timestamps: list[dict],
+    ) -> list[dict]:
+        """Group DTW token timestamps into words using explicit ``_`` space tokens as delimiters."""
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+
+        if len(char_timestamps) != len(token_ids):
+            logging.warning(
+                f"Token/timestamp length mismatch ({len(token_ids)} ids vs "
+                f"{len(char_timestamps)} timestamps); truncating to the shorter length."
+            )
+            pair_count = min(len(token_ids), len(char_timestamps))
+            token_ids = token_ids[:pair_count]
+            char_timestamps = char_timestamps[:pair_count]
+
+        space_id = self._standalone_space_token_id()
+        supported_punctuation = {",", ".", "!", "?", "¿"}
+        word_offsets: list[dict] = []
+        current_token_strs: list[str] = []
+        current_start_ts: dict | None = None
+        last_content_ts: dict | None = None
+
+        def flush_word() -> None:
+            nonlocal current_token_strs, current_start_ts, last_content_ts
+            if not current_token_strs or current_start_ts is None or last_content_ts is None:
+                current_token_strs = []
+                current_start_ts = None
+                last_content_ts = None
+                return
+            word = self.decode_tokens_to_str(current_token_strs).strip()
+            if word:
+                word_offsets.append(
+                    {
+                        "word": word,
+                        "start_offset": current_start_ts["start_offset"],
+                        "end_offset": last_content_ts["end_offset"],
+                        "start": current_start_ts["start"],
+                        "end": last_content_ts["end"],
+                    }
+                )
+            current_token_strs = []
+            current_start_ts = None
+            last_content_ts = None
+
+        for token_id, ts in zip(token_ids, char_timestamps):
+            tid = token_id.item() if isinstance(token_id, torch.Tensor) else token_id
+            token_str = self.tokenizer.ids_to_tokens([tid])[0]
+
+            if tid == space_id:
+                flush_word()
+                continue
+
+            if self._is_special_token(token_str) or token_str in {"ĊĊ", "Ċ"}:
+                flush_word()
+                continue
+
+            decoded = self.tokenizer.tokens_to_text([token_str]).strip()
+            if decoded in supported_punctuation or self._is_punctuation_token(token_str):
+                if current_token_strs:
+                    current_token_strs.append(token_str)
+                    last_content_ts = ts
+                    flush_word()
+                elif word_offsets:
+                    word_offsets[-1]["word"] = f"{word_offsets[-1]['word'].rstrip()}{decoded}"
+                    word_offsets[-1]["end_offset"] = ts["end_offset"]
+                    word_offsets[-1]["end"] = ts["end"]
+                continue
+
+            if not current_token_strs:
+                current_start_ts = ts
+            current_token_strs.append(token_str)
+            last_content_ts = ts
+
+        flush_word()
+        return word_offsets
+
+    def _is_special_token(self, token: str) -> bool:
+        return token.startswith("<")
+
+    def _is_punctuation_token(self, token: str) -> bool:
+        stripped = token.lstrip(self.space_prefix_char)
+        return bool(stripped) and not any(c.isalnum() for c in stripped)
+
+    def _append_space_token(
+        self,
+        processed_tokens: list[str],
+        processed_masks: list[bool] | None,
+        space_token: str,
+        token_mask: bool | None,
+    ) -> None:
+        if processed_tokens and processed_tokens[-1] == space_token:
+            return
+        processed_tokens.append(space_token)
+        if processed_masks is not None:
+            processed_masks.append(token_mask)
+
+    def retokenize_with_separate_space(
+        self,
+        ids: torch.Tensor | list[int],
+        mask: list[bool] | None = None,
+    ):
         """
         Retokenize BPE token IDs by separating the space-prefix character from tokens.
 
@@ -743,32 +926,67 @@ class SALM(LightningModule, HFHubMixin):
 
         Args:
             ids: Token IDs (list or tensor) to retokenize
+            mask: Optional per-token loss mask aligned with ``ids``
 
         Returns:
-            tuple: (tokens, token_ids)
+            tuple: (tokens, token_ids) or (tokens, token_ids, mask) when ``mask`` is provided
         """
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        if mask is not None:
+            assert len(mask) == len(ids)
+
         bpe_tokens = self.tokenizer.ids_to_tokens(ids)
         sp = self.space_prefix_char
+        space_token = self.tokenizer.ids_to_tokens([self._standalone_space_token_id()])[0]
+        has_llama_header = any(self._is_special_token(t) for t in bpe_tokens)
+        content_started = not has_llama_header
 
-        processed_tokens = [""]
-        for token, id_token in zip(bpe_tokens, ids):
+        processed_tokens: list[str] = []
+        processed_masks = [] if mask is not None else None
+        for token, id_token, token_mask in zip(
+            bpe_tokens,
+            ids,
+            mask if mask is not None else [None] * len(ids),
+        ):
             if isinstance(id_token, torch.Tensor):
                 id_token = id_token.item()
             if id_token == 0:
                 continue
+            if token in {"ĊĊ", "Ċ"}:
+                processed_tokens.append(token)
+                if mask is not None:
+                    processed_masks.append(token_mask)
+                content_started = True
+                continue
             if token.startswith(sp):
                 rest_of_token = token[len(sp):]
                 if rest_of_token:
-                    processed_tokens.append(sp)
+                    if content_started:
+                        self._append_space_token(processed_tokens, processed_masks, space_token, token_mask)
                     processed_tokens.append(token)
+                    if mask is not None:
+                        processed_masks.append(token_mask)
                 else:
                     processed_tokens.append(token)
+                    if mask is not None:
+                        processed_masks.append(token_mask)
             else:
+                if (
+                    content_started
+                    and not self._is_special_token(token)
+                    and not self._is_punctuation_token(token)
+                    and self._should_prepend_space_before_token(token, processed_tokens, space_token)
+                ):
+                    self._append_space_token(processed_tokens, processed_masks, space_token, token_mask)
                 processed_tokens.append(token)
+                if mask is not None:
+                    processed_masks.append(token_mask)
 
-        token_ids = []
-        for token in processed_tokens:
-            token_ids.append(self.tokenizer.tokens_to_ids(token))
+        token_ids = [self.tokenizer.tokens_to_ids(token) for token in processed_tokens]
+        if mask is not None:
+            assert len(token_ids) == len(processed_masks)
+            return processed_tokens, token_ids, processed_masks
         return processed_tokens, token_ids
 
     def _process_attention_matrix(
