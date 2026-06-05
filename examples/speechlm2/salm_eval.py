@@ -136,15 +136,16 @@ def main(cfg: SalmEvalConfig):
         batch_duration = sum(c.duration for c in batch["cuts"])
 
         batch_refs = [normalizer(cut.supervisions[0].text) for cut in batch["cuts"]]
+        space_token_id = model.space_token_tag_id
         if cfg.timestamps:
             batch_hyps = [
-                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans[0], eos_tokens)).strip()) for ans in answer_ids
+                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans[0], eos_tokens, space_token_id)).strip()) for ans in answer_ids
             ]
             timestamp_batch = [answer_ids[i][1] for i in range(len(answer_ids))]
             segment_offsets_batch = [answer_ids[i][2] for i in range(len(answer_ids))]
         else:
             batch_hyps = [
-                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans, eos_tokens)).strip()) for ans in answer_ids
+                normalizer(model.tokenizer.ids_to_text(parse_hyp(ans, eos_tokens, space_token_id)).strip()) for ans in answer_ids
             ]
         if cfg.verbose:
             batch_wer, _, nins, ndel, nsub = word_error_rate_detail(batch_hyps, batch_refs)
@@ -166,28 +167,43 @@ def main(cfg: SalmEvalConfig):
     logging.info(f"WER: {wer:.2%} [ins={nins:.2%} del={ndel:.2%} sub={nsub:.2%}]")
     logging.info(f"RTFx: {rtfx:.1f}")
 
+    # NOTE: cut.id is the lhotse recording id, which for NeMo manifests defaults to the audio
+    # file *stem* (Recording.from_file). For datasets that reuse filenames across speakers
+    # (e.g. TIMIT: SA1/SA2/SX* are recorded by hundreds of speakers) this id is NOT unique, so
+    # downstream id-based matching collapses many predictions onto one. We additionally emit the
+    # full audio path so evaluation can match on a globally-unique key. This does not change how
+    # audio is loaded or how timestamps are produced.
+    def _audio_path(cut):
+        try:
+            return cut.recording.sources[0].source
+        except Exception:
+            return cut.id
+
     if cfg.output_manifest is not None:
         with SequentialJsonlWriter(cfg.output_manifest) as writer:
             if cfg.timestamps:
                 for cut, ref, hyp, timestamp, seg_offsets in zip(cuts, refs, hyps, timestamps, segment_offsets_list):
-                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp, "segment_offsets": seg_offsets}
+                    entry = {"id": cut.id, "audio_filepath": _audio_path(cut), "duration": cut.duration, "text": ref, "pred_text": hyp, "word": timestamp, "segment_offsets": seg_offsets}
                     if cut.custom and "answer" in cut.custom:
                         entry["answer"] = cut.custom["answer"]
                     writer.write(entry)
             else:
                 for cut, ref, hyp in zip(cuts, refs, hyps):
-                    entry = {"id": cut.id, "duration": cut.duration, "text": ref, "pred_text": hyp}
+                    entry = {"id": cut.id, "audio_filepath": _audio_path(cut), "duration": cut.duration, "text": ref, "pred_text": hyp}
                     if cut.custom and "answer" in cut.custom:
                         entry["answer"] = cut.custom["answer"]
                     writer.write(entry)
 
 
-def parse_hyp(answer: torch.Tensor, eos_tokens: list[int]):
+def parse_hyp(answer: torch.Tensor, eos_tokens: list[int], space_token_id: int | None = None):
     end = torch.isin(answer, torch.tensor(eos_tokens)).nonzero(as_tuple=True)[0]
     if end.numel() == 0:
-        return answer
-    end = end[0]
-    return answer[:end]
+        ids = answer
+    else:
+        ids = answer[:end[0]]
+    if space_token_id is not None:
+        ids = ids[ids != space_token_id]
+    return ids
 
 
 if __name__ == '__main__':

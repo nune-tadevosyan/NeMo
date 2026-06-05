@@ -744,15 +744,14 @@ class SALM(LightningModule, HFHubMixin):
             attention_matrices = torch.stack(
                 [
                     needed_scores[layer_idx][
-                        :, :, -num_text_tokens:, 1 : audio_len
+                        :, :, -num_text_tokens:, 1 : audio_len-1
                     ]
                     for layer_idx in range(len(needed_scores))
                 ],
                 dim=0,
             ).squeeze(1)
-
             attention_matrix = self._process_attention_matrix(attention_matrices)
-            
+            #self._save_attention_matrix_image(attention_matrix, batch_idx=batch_idx)
             dtw_input = torch.tensor(attention_matrix.unsqueeze(0), device=attention_matrix.device).double()
             _, path = dtw_alignment(dtw_input, allow_vertical=True)
             timestamps = create_timestamps_from_dtw_path(path, torch.tensor(new_token_ids), self.tokenizer)
@@ -776,7 +775,6 @@ class SALM(LightningModule, HFHubMixin):
                     word['end_offset'] = word['end_offset'] - 1
                     word['start'] = word['start'] - 0.08
                     word['end'] = word['end'] - 0.08
-            
             segment_offsets = get_segment_offsets(word_offsets=word_offsets, segment_delimiter_tokens={'.', '!', '?', "...", "¿"})
             return_answer_tokens.append((answer_tokens[batch_idx].cpu(), word_offsets, segment_offsets))
 
@@ -1061,6 +1059,33 @@ class SALM(LightningModule, HFHubMixin):
         attention_matrix = attention_matrix/attention_matrix.norm(dim=-2, keepdim=True)
         
         return attention_matrix
+
+    def _save_attention_matrix_image(
+        self,
+        attention_matrix: torch.Tensor,
+        batch_idx: int = 0,
+        output_dir: str | Path = "/lustre/fsw/portfolios/convai/users/ntadevosyan/code/salm_timestamps/attention_matrix_viz_timit",
+    ) -> Path:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"attention_matrix_batch_{batch_idx}.png"
+
+        matrix = attention_matrix.detach().cpu().float().numpy()
+        plt.figure(figsize=(10, 6))
+        plt.imshow(matrix, cmap="viridis", aspect="auto", origin="lower")
+        plt.colorbar(label="Attention")
+        plt.xlabel("Audio frames")
+        plt.ylabel("Text tokens")
+        plt.title(f"Attention matrix (batch {batch_idx})")
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        logging.info(f"Saved attention matrix to {output_path}")
+        return output_path
 
     def configure_optimizers(self):
         return configure_optimizers(self)
