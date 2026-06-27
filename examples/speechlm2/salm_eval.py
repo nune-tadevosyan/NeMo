@@ -58,6 +58,7 @@ class SalmEvalConfig:
     system_prompt: Optional[str] = None
     user_prompt: Optional[str] = None
     timestamps: bool = False
+    disable_lora_second_pass: bool = False  # if True, LoRA adapters are disabled during the attention-extraction pass
     use_asr_decoder: bool = False  # set this to True if using SALMWithAsrDecoder
 
 
@@ -132,6 +133,7 @@ def main(cfg: SalmEvalConfig):
             ),
             timestamps=cfg.timestamps,
             ground_truth_texts=gt_texts,
+            disable_lora_second_pass=cfg.disable_lora_second_pass,
         )
         batch_infer_duration = perf_counter() - ts
 

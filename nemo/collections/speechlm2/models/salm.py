@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
 import warnings
 from collections import defaultdict
 from itertools import repeat
@@ -579,6 +580,7 @@ class SALM(LightningModule, HFHubMixin):
         generation_config: GenerationConfig = None,
         timestamps: bool = False,
         ground_truth_texts: list[str] = None,
+        disable_lora_second_pass: bool = False,
         **generation_kwargs,
     ) -> torch.Tensor:
         """
@@ -740,7 +742,12 @@ class SALM(LightningModule, HFHubMixin):
                 device=self.device,
             )
 
-            with move_embedding(self):
+            _lora_ctx = (
+                self.llm.disable_adapter()
+                if disable_lora_second_pass and isinstance(self.llm, PeftModel)
+                else contextlib.nullcontext()
+            )
+            with _lora_ctx, move_embedding(self):
                 if hasattr(self.llm.config, '_attn_implementation'):
                     original_attn_impl = self.llm.config._attn_implementation
                     self.llm.config._attn_implementation = 'eager'
@@ -799,6 +806,9 @@ class SALM(LightningModule, HFHubMixin):
             return self.space_token_tag_id
         return self.space_token_id
 
+    # Characters that act as contraction joiners — should never trigger a word boundary
+    _CONTRACTION_CHARS = {"'", "’", "ʼ", "`"}  # apostrophe, right-single-quote, modifier-apostrophe, grave
+
     def _should_prepend_space_before_token(
         self, token: str, processed_tokens: list[str], space_token: str
     ) -> bool:
@@ -810,6 +820,9 @@ class SALM(LightningModule, HFHubMixin):
         if prev == space_token:
             return False
         if self._is_punctuation_token(prev):
+            decoded_prev = self.tokenizer.tokens_to_text([prev]).strip()
+            if decoded_prev in self._CONTRACTION_CHARS:
+                return False
             return True
         return False
 
