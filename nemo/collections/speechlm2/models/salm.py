@@ -218,8 +218,12 @@ class SALM(LightningModule, HFHubMixin):
         self.save_hyperparameters()
         self.cfg = DictConfig(cfg)
         self.audio_locator_tag = self.cfg.audio_locator_tag
-        self.space_token_tag = self.cfg.get("space_token_tag", "_")
+        self.space_token_tag = self.cfg.get("space_token_tag", None)
         self.retokenize_with_separate_space_training = self.cfg.get("retokenize_with_separate_space", False)
+        # Features are independent: space_token_tag=None disables DTW space-token timestamps (inference
+        # falls back to standard get_words_offsets). retokenize_with_separate_space=False disables training
+        # batch retokenization. When Feature A is off, _standalone_space_token_id() falls back to the
+        # native space token so Feature B still works correctly.
 
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
         special_tokens = [self.audio_locator_tag]
@@ -403,6 +407,7 @@ class SALM(LightningModule, HFHubMixin):
         input_embeds: Tensor,
         attention_mask: Tensor = None,
         cache=None,
+        output_attentions: bool = False,
     ) -> dict[str, Tensor]:
         """
         Implements a fully offline forward pass through the entire model.
@@ -418,8 +423,11 @@ class SALM(LightningModule, HFHubMixin):
             past_key_values=cache,
             use_cache=cache is not None,
             return_dict=True,
+            output_attentions=output_attentions,
         )
         ans = {"logits": out['logits']}  # (B, T, text_vocab_size)
+        if output_attentions:
+            ans["attentions"] = out["attentions"]  # tuple of (B, H, T, T), one per layer
         if cache is not None:
             ans["cache"] = out["past_key_values"]
         return ans
@@ -469,6 +477,16 @@ class SALM(LightningModule, HFHubMixin):
         attention_mask = attention_mask[:, :-1]
         target_ids = target_ids[:, 1:]
 
+        # Compute where audio frames land in the combined padded sequence.
+        # Must be called after the [:, :-1] slice so combined_seq_len matches.
+        combined_seq_len = input_embs.shape[1]
+        audio_start, audio_len = self._compute_audio_positions(
+            batch["input_ids"], audio_emb_lens, combined_seq_len
+        )
+        text_start, text_len = self._compute_target_text_positions(
+            batch["input_ids"], batch["loss_mask"], audio_emb_lens, combined_seq_len
+        )
+
         # Combine target audio and text into a single tensor to slice them together.
         # It will also help us truncate the sequence lengths to be divisible by TP world size,
         # when TP is enabled.
@@ -486,6 +504,10 @@ class SALM(LightningModule, HFHubMixin):
             "input_embeds": input_embs,
             "attention_mask": attention_mask,
             "target_ids": target_ids,
+            "audio_start": audio_start,  # (B,) position of audio in combined sequence
+            "audio_len": audio_len,      # (B,) number of audio frames per sample
+            "text_start": text_start,    # (B,) first assistant text embedding (matches timestamp DTW rows)
+            "text_len": text_len,        # (B,) number of assistant text embeddings
         }
 
     def training_step(self, batch: dict, batch_idx: int):
@@ -494,7 +516,22 @@ class SALM(LightningModule, HFHubMixin):
                 m.eval()
 
         inputs = self.prepare_inputs(batch)
-        forward_outputs = self(inputs["input_embeds"], attention_mask=inputs["attention_mask"])
+
+        mono_weight = self.cfg.get("monotonicity_loss_weight", 0.0)
+        # output_attentions requires eager attention; disable with TP (not supported)
+        output_attentions = mono_weight > 0.0 and not self._use_tp
+
+        orig_attn_impl = None
+        if output_attentions and hasattr(self.llm, 'config'):
+            orig_attn_impl = getattr(self.llm.config, '_attn_implementation', None)
+            self.llm.config._attn_implementation = 'eager'
+
+        forward_outputs = self(inputs["input_embeds"], attention_mask=inputs["attention_mask"],
+                               output_attentions=output_attentions)
+
+        if orig_attn_impl is not None:
+            self.llm.config._attn_implementation = orig_attn_impl
+
         num_frames = (inputs["target_ids"] != -100).long().sum()
         with loss_parallel():
             loss = (
@@ -519,6 +556,18 @@ class SALM(LightningModule, HFHubMixin):
             "target_to_input_ratio": num_frames / (B * T),
             "padding_ratio": (batch["input_ids"] != self.text_pad_id).long().sum() / batch["input_ids"].numel(),
         }
+
+        if output_attentions and "attentions" in forward_outputs:
+            mono_loss = self._compute_monotonicity_loss(
+                forward_outputs["attentions"],
+                inputs["audio_start"],
+                inputs["audio_len"],
+                inputs["text_start"],
+                inputs["text_len"],
+            )
+            ans["loss"] = loss + mono_weight * mono_loss
+            ans["monotonicity_loss"] = mono_loss.detach()
+
         self.log_dict(ans, on_step=True)
         return ans
 
@@ -719,6 +768,9 @@ class SALM(LightningModule, HFHubMixin):
 
         return_answer_tokens = []
         for batch_idx in range(0,len(audio_embeds)):
+            # Always retokenize for DTW alignment; when space_token_tag is None, uses the native space
+            # token as separator (_standalone_space_token_id falls back) — Feature A may be off but DTW
+            # still needs a 1-token-per-unit representation.
             new_tokens, new_token_ids = self.retokenize_with_separate_space(answer_tokens[batch_idx])
             text = self.tokenizer.ids_to_text(answer_tokens[batch_idx])
             text = text.strip('!')
@@ -1086,6 +1138,174 @@ class SALM(LightningModule, HFHubMixin):
         plt.close()
         logging.info(f"Saved attention matrix to {output_path}")
         return output_path
+
+    def _compute_audio_positions(
+        self,
+        input_ids: Tensor,
+        audio_emb_lens: list,
+        combined_seq_len: int,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Compute where audio frames land in the final left-padded combined sequence.
+
+        After replace_placeholders_and_build_targets, the placeholder token is replaced by
+        audio_emb_lens[b] frames and the whole sequence is left-padded to combined_seq_len.
+        This helper reconstructs the start position and length of audio for each sample.
+
+        Returns:
+            audio_start: (B,) int64 — index of first audio frame in combined sequence
+            audio_len:   (B,) int64 — number of audio frames
+        """
+        B = input_ids.shape[0]
+        audio_starts = []
+        for b in range(B):
+            # Find first non-padding token in original input_ids
+            valid_start = (input_ids[b] != self.text_pad_id).nonzero(as_tuple=True)[0]
+            if valid_start.numel() == 0:
+                audio_starts.append(0)
+                continue
+            valid_start = valid_start[0].item()
+            unpadded = input_ids[b, valid_start:]
+
+            # Find the audio placeholder position in the unpadded sequence
+            placeholder_positions = (unpadded == self.audio_locator_tag_id).nonzero(as_tuple=True)[0]
+            if placeholder_positions.numel() == 0:
+                audio_starts.append(0)
+                continue
+            placeholder_pos = placeholder_positions[0].item()
+
+            a_len = audio_emb_lens[b].item() if hasattr(audio_emb_lens[b], 'item') else int(audio_emb_lens[b])
+            # Combined unpadded length = (len(unpadded) - 1 placeholder replaced) + audio_len
+            combined_unpadded = len(unpadded) - 1 + a_len
+            # Left-padding offset in combined padded sequence
+            padding_offset = combined_seq_len - combined_unpadded
+            audio_starts.append(padding_offset + placeholder_pos)
+
+        audio_start_t = torch.tensor(audio_starts, device=input_ids.device, dtype=torch.long)
+        audio_len_t = torch.stack([
+            a.clone().detach().long() if isinstance(a, Tensor) else torch.tensor(a, dtype=torch.long)
+            for a in audio_emb_lens
+        ]).to(input_ids.device)
+        return audio_start_t, audio_len_t
+
+    def _compute_target_text_positions(
+        self,
+        input_ids: Tensor,
+        loss_mask: Tensor,
+        audio_emb_lens: list,
+        combined_seq_len: int,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Locate assistant target text embeddings in the shifted combined sequence.
+
+        Mirrors the row selection used for timestamp DTW: in [audio | text] inference,
+        rows are the last ``num_text_tokens`` text-embedding query positions, i.e.
+        indices ``[audio_len, audio_len + num_text_tokens)`` relative to audio start.
+
+        Returns:
+            text_start: (B,) int64 — index of first assistant text embedding
+            text_len:   (B,) int64 — number of assistant text embeddings
+        """
+        B = input_ids.shape[0]
+        text_starts = []
+        text_lens = []
+        for b in range(B):
+            valid_start = (input_ids[b] != self.text_pad_id).nonzero(as_tuple=True)[0]
+            if valid_start.numel() == 0:
+                text_starts.append(0)
+                text_lens.append(0)
+                continue
+            valid_start = valid_start[0].item()
+            unpadded_ids = input_ids[b, valid_start:]
+            unpadded_mask = loss_mask[b, valid_start:]
+
+            placeholder_positions = (unpadded_ids == self.audio_locator_tag_id).nonzero(as_tuple=True)[0]
+            if placeholder_positions.numel() == 0:
+                text_starts.append(0)
+                text_lens.append(0)
+                continue
+            placeholder_pos = placeholder_positions[0].item()
+
+            a_len = audio_emb_lens[b].item() if hasattr(audio_emb_lens[b], 'item') else int(audio_emb_lens[b])
+            combined_unpadded = len(unpadded_ids) - 1 + a_len
+            padding_offset = combined_seq_len - combined_unpadded
+            text_starts.append(padding_offset + placeholder_pos + a_len)
+            text_lens.append(int(unpadded_mask[placeholder_pos + 1:].long().sum().item()))
+
+        text_start_t = torch.tensor(text_starts, device=input_ids.device, dtype=torch.long)
+        text_len_t = torch.tensor(text_lens, device=input_ids.device, dtype=torch.long)
+        return text_start_t, text_len_t
+
+    def _compute_monotonicity_loss(
+        self,
+        attentions: tuple,
+        audio_start: Tensor,
+        audio_len: Tensor,
+        text_start: Tensor,
+        text_len: Tensor,
+    ) -> Tensor:
+        """
+        Gaussian diagonal regularization on the same attention sub-matrix used for DTW timestamps.
+
+        Matches inference extraction in ``generate``:
+            rows: assistant text-embedding queries  ``[-num_text_tokens:]``
+            cols: audio frames ``[1 : audio_len - 1]`` (exclude first and last frame)
+
+        Builds a row-normalized Gaussian target along the diagonal and returns
+        MSE(A_normalized, G) averaged over the batch.
+
+        Args:
+            attentions: tuple of per-layer tensors (B, H, T, T), post-softmax
+            audio_start: (B,) start of audio in combined sequence
+            audio_len:   (B,) number of audio frames
+            text_start:  (B,) start of assistant text embeddings in combined sequence
+            text_len:    (B,) number of assistant text embeddings
+        """
+        sigma = self.cfg.get("monotonicity_loss_sigma", 10.0)
+        n_layers = self.cfg.get("monotonicity_loss_layers", 4)
+
+        # Select last n_layers layers
+        selected = attentions[-n_layers:] if n_layers < len(attentions) else attentions
+        # Stack and average over layers and heads: (B, T, T)
+        attn_avg = torch.stack(selected, dim=0).mean(dim=0).mean(dim=1)
+
+        total_loss = attn_avg.new_zeros(())
+        count = 0
+        B, T = attn_avg.shape[0], attn_avg.shape[1]
+        for b in range(B):
+            a_start = audio_start[b].item()
+            a_len = audio_len[b].item()
+            t_start = text_start[b].item()
+            t_len = text_len[b].item()
+            if a_len < 3 or t_len == 0:
+                continue
+
+            # Same slice as timestamp DTW: cols 1:audio_len-1, rows last num_text_tokens
+            a_col_start = a_start + 1
+            a_col_end = a_start + a_len - 1
+            t_row_end = min(t_start + t_len, T)
+            if t_row_end <= t_start or a_col_end <= a_col_start:
+                continue
+
+            A = attn_avg[b, t_start:t_row_end, a_col_start:a_col_end]
+            T_text, T_audio = A.shape
+            if T_text == 0 or T_audio == 0:
+                continue
+
+            # Build Gaussian target along the diagonal
+            t_idx = torch.arange(T_text, device=A.device, dtype=A.dtype)
+            f_idx = torch.arange(T_audio, device=A.device, dtype=A.dtype)
+            expected_f = t_idx * (T_audio - 1) / max(T_text - 1, 1)
+            G = torch.exp(-(expected_f.unsqueeze(1) - f_idx.unsqueeze(0)) ** 2 / (2.0 * sigma ** 2))
+            G = G / G.sum(dim=-1, keepdim=True)
+
+            # Normalize attention rows to sum to 1 over the audio columns
+            A_norm = A / (A.sum(dim=-1, keepdim=True) + 1e-8)
+
+            total_loss = total_loss + torch.nn.functional.mse_loss(A_norm, G)
+            count += 1
+
+        return total_loss / max(count, 1)
 
     def configure_optimizers(self):
         return configure_optimizers(self)
