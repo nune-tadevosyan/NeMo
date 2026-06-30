@@ -218,12 +218,8 @@ class SALM(LightningModule, HFHubMixin):
         self.save_hyperparameters()
         self.cfg = DictConfig(cfg)
         self.audio_locator_tag = self.cfg.audio_locator_tag
-        self.space_token_tag = self.cfg.get("space_token_tag", None)
+        self.space_token_tag = self.cfg.get("space_token_tag", "_")
         self.retokenize_with_separate_space_training = self.cfg.get("retokenize_with_separate_space", False)
-        # Features are independent: space_token_tag=None disables DTW space-token timestamps (inference
-        # falls back to standard get_words_offsets). retokenize_with_separate_space=False disables training
-        # batch retokenization. When Feature A is off, _standalone_space_token_id() falls back to the
-        # native space token so Feature B still works correctly.
 
         self.tokenizer = AutoTokenizer(self.cfg.pretrained_llm, use_fast=True)
         special_tokens = [self.audio_locator_tag]
@@ -840,6 +836,9 @@ class SALM(LightningModule, HFHubMixin):
             return self.space_token_tag_id
         return self.space_token_id
 
+    # Characters that act as contraction joiners — should never trigger a word boundary
+    _CONTRACTION_CHARS = {"'", "’", "ʼ", "`"}  # apostrophe, right-single-quote, modifier-apostrophe, grave
+
     def _should_prepend_space_before_token(
         self, token: str, processed_tokens: list[str], space_token: str
     ) -> bool:
@@ -851,6 +850,9 @@ class SALM(LightningModule, HFHubMixin):
         if prev == space_token:
             return False
         if self._is_punctuation_token(prev):
+            decoded_prev = self.tokenizer.tokens_to_text([prev]).strip()
+            if decoded_prev in self._CONTRACTION_CHARS:
+                return False
             return True
         return False
 
