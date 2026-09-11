@@ -65,7 +65,11 @@ def load_pretrained_nemo_config(cls, model_path_or_name: str):
 
 
 def load_pretrained_hf(
-    model_path_or_name: str, pretrained_weights: bool = True, dtype=torch.float32, trust_remote_code: bool = False
+    model_path_or_name: str,
+    pretrained_weights: bool = True,
+    dtype=torch.float32,
+    trust_remote_code: bool = False,
+    text_only: bool = False,
 ):
     """
     Load pretrained HuggingFace AutoModelForCausalLM.
@@ -78,14 +82,23 @@ def load_pretrained_hf(
         pretrained_weights: Whether to load pretrained weights (True) or random init (False)
         dtype: Data type for the model
         trust_remote_code: Whether to trust remote code when loading model (needed for some models like Nemotron)
+        text_only: For multimodal checkpoints (e.g. Gemma 4 ``*ForConditionalGeneration``), build only the
+            text decoder from ``config.text_config`` and load the ``model.language_model.*`` weights into it,
+            skipping the vision/audio towers.
     """
+    config = AutoConfig.from_pretrained(model_path_or_name, trust_remote_code=trust_remote_code)
+    load_kwargs = {}
+    if text_only:
+        text_config = getattr(config, "text_config", None)
+        if text_config is None:
+            raise ValueError(f"text_only=True requires a multimodal config with 'text_config', got {type(config)}")
+        config = text_config
+        load_kwargs = {"config": config, "key_mapping": {r"^model\.language_model\.": "model."}}
     if pretrained_weights:
         return AutoModelForCausalLM.from_pretrained(
-            model_path_or_name, torch_dtype=dtype, trust_remote_code=trust_remote_code
+            model_path_or_name, torch_dtype=dtype, trust_remote_code=trust_remote_code, **load_kwargs
         )
-    else:
-        config = AutoConfig.from_pretrained(model_path_or_name, trust_remote_code=trust_remote_code)
-        return AutoModelForCausalLM.from_config(config, torch_dtype=dtype, trust_remote_code=trust_remote_code)
+    return AutoModelForCausalLM.from_config(config, torch_dtype=dtype, trust_remote_code=trust_remote_code)
 
 
 def load_pretrained_automodel_llm(
@@ -242,16 +255,36 @@ def update_perception_output_dim(model):
 
 @contextmanager
 def move_embedding(model):
-    """Temporarily restores the embedding layer into HF LLM. Supports LoRA models."""
-    if isinstance(model.llm, PeftModel):
-        model.llm.base_model.model.model.embed_tokens = model.embed_tokens
-    else:
-        model.llm.model.embed_tokens = model.embed_tokens
+    """Temporarily restores the embedding layer(s) into HF LLM. Supports LoRA models."""
+    llm_model = model.llm.base_model.model.model if isinstance(model.llm, PeftModel) else model.llm.model
+    llm_model.embed_tokens = model.embed_tokens
+    if getattr(model, "embed_tokens_per_layer", None) is not None:
+        llm_model.embed_tokens_per_layer = model.embed_tokens_per_layer
     yield
-    if isinstance(model.llm, PeftModel):
-        del model.llm.base_model.model.model.embed_tokens
-    else:
-        del model.llm.model.embed_tokens
+    del llm_model.embed_tokens
+    if getattr(model, "embed_tokens_per_layer", None) is not None:
+        del llm_model.embed_tokens_per_layer
+
+
+@contextmanager
+def per_layer_inputs_prefill_only(llm):
+    """
+    HF's generic ``prepare_inputs_for_generation`` keeps forwarding ``per_layer_inputs`` on every decode step,
+    but Gemma 4 rejects it once ``input_ids`` are passed (i.e. after the ``inputs_embeds`` prefill).
+    """
+    original = llm.prepare_inputs_for_generation
+
+    def patched(*args, **kwargs):
+        model_inputs = original(*args, **kwargs)
+        if model_inputs.get("inputs_embeds") is None:
+            model_inputs.pop("per_layer_inputs", None)
+        return model_inputs
+
+    llm.prepare_inputs_for_generation = patched
+    try:
+        yield
+    finally:
+        del llm.prepare_inputs_for_generation
 
 
 def setup_audio_codec(model: torch.nn.Module):
